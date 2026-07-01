@@ -1,0 +1,32 @@
+# =============================================================================
+# crypto_bot — tradable universe.
+# Copy to "config/universe.yaml" (gitignored).
+# =============================================================================
+
+# Quote currency. All pairs are built as <symbol>/<quote> (e.g. BTC/USDT).
+quote: USDT
+
+# Explicit watchlist of base assets. Combined with auto_discover results.
+symbols:
+  - BTC
+  - ETH
+  - SOL
+  - BNB
+  - XRP
+  - ADA
+  - AVAX
+  - LINK
+  - DOGE
+  - MATIC
+
+auto_discover:
+  enabled: true
+  top_n: 60            # add the top-N symbols by 24h quote volume
+
+# Always excluded (in addition to the list below).
+exclude:
+  - ""
+
+# Convenience flags: drop well-known stablecoins and leveraged tokens.
+exclude_stablecoins: true        # USDC, USDT, BUSD, DAI, TUSD, FDUSD, ...
+exclude_leveraged_tokens: true   # *UP, *DOWN, *BULL, *BEAR, 3L/3S/5L/5S

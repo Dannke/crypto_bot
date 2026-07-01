@@ -1,0 +1,77 @@
+# =============================================================================
+# crypto_bot — strategy, risk & runtime configuration.
+# Copy to "config/settings.yaml" (gitignored). Validated by pydantic schemas in
+# src/crypto_bot/config/schemas.py. Runtime-mode policy (e.g. refusing to start
+# in LIVE until paper + tests are ready) is enforced by the orchestrator, not here.
+# =============================================================================
+
+runtime:
+  mode: signal_only        # signal_only | paper | live
+  loop_interval_seconds: 60
+  timezone: UTC
+
+exchange:
+  name: binance
+  sandbox: true            # use testnet/sandbox endpoints
+  rate_limit_ms: 1200      # conservative per-request spacing
+
+timeframes:
+  primary: ["15m", "1h", "4h"]   # trigger / confirmation / trend
+  candles_per_tf: 250            # must cover ema_slow(200)+margin; >=210 enforced
+
+strategy:
+  trend:
+    ema_fast: 21
+    ema_mid: 50
+    ema_slow: 200
+    adx_min: 20.0          # ignore weak/choppy trends below this
+  momentum:
+    rsi_period: 14
+    rsi_long_min: 50.0     # longs need RSI in [50, 70]
+    rsi_long_max: 70.0
+    rsi_short_min: 30.0    # shorts need RSI in [30, 50]
+    rsi_short_max: 50.0
+  volatility:
+    atr_period: 14
+    atr_min_pct: 0.5       # exclude dead coins
+    atr_max_pct: 8.0       # exclude extreme movers
+    bb_period: 20
+    bb_std: 2.0
+  volume:
+    ma_period: 20
+    spike_ratio: 1.5       # current volume vs its MA
+
+scoring:
+  weights:
+    trend: 0.30
+    momentum: 0.20
+    volume: 0.15
+    setup: 0.15
+    reward_risk: 0.15
+    liquidity: 0.05
+  min_score: 65.0          # only candidates >= this are considered (0..100)
+  min_confidence: 0.6      # 0..1, cross-timeframe agreement threshold
+  max_candidates_per_cycle: 3
+
+filters:
+  min_quote_volume_usd: 5000000.0
+  max_spread_pct: 0.15
+  blacklist: []
+  cooldown_after_trade_minutes: 240   # no re-entry on a symbol after a trade
+
+risk:
+  equity_currency: USDT
+  risk_per_trade_pct: 1.0            # fraction of equity risked per trade
+  take_profit_risk_multiple: 2.0     # TP distance = multiple * stop distance
+  max_stop_distance_pct: 3.0         # reject setups needing a wider stop
+  max_open_positions: 5
+  max_daily_drawdown_pct: 3.0        # stop opening new positions at this loss
+  emergency_drawdown_pct: 6.0        # hard halt: flatten & exit loop
+
+storage:
+  db_path: data/crypto_bot.db
+
+logging:
+  level: INFO
+  file: logs/crypto_bot.log
+  json: false

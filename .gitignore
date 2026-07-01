@@ -1,0 +1,42 @@
+# --- Secrets & local config ---
+.env
+.env.*
+!.env.example
+config/settings.yaml
+config/universe.yaml
+
+# --- Runtime data & logs ---
+data/*
+!data/.gitkeep
+logs/*
+!logs/.gitkeep
+*.db
+*.db-journal
+*.sqlite
+*.sqlite3
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.eggs/
+
+# --- Virtualenvs ---
+.venv/
+venv/
+env/
+
+# --- Tooling caches ---
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# --- OS / editor ---
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

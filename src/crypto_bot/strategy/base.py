@@ -1,0 +1,52 @@
+"""Strategy base contract.
+
+Defines the common interface every strategy variant will implement, plus a
+``StrategyContext`` — the read-only bundle of strategy parameters a strategy
+needs. Keeping this abstract means we can add alternative strategies later
+without touching the orchestrator.
+"""
+from __future__ import annotations
+
+from abc import ABC, abstractmethod
+from dataclasses import dataclass
+from typing import Any
+
+from ..core.types import FeatureSet, ScoredCandidate
+
+
+@dataclass(frozen=True, slots=True)
+class StrategyContext:
+    """Resolved, read-only strategy parameters handed to a strategy.
+
+    Decoupling the raw ``Settings`` from what a strategy reads keeps the
+    strategy layer independent of the config schema's evolution.
+    """
+
+    scoring_weights: dict[str, float]
+    min_score: float
+    min_confidence: float
+    adx_min: float
+    rsi_long: tuple[float, float]
+    rsi_short: tuple[float, float]
+    atr_min_pct: float
+    atr_max_pct: float
+    take_profit_risk_multiple: float
+    raw: dict[str, Any] | None = None
+
+
+class Strategy(ABC):
+    """A strategy turns feature sets into scored candidates.
+
+    Lifecycle:
+      ``evaluate(symbol, per_tf_features) -> SignalResult``
+      ``score(features, signal)         -> ScoredCandidate | None``
+    The orchestrator calls evaluate first, then score for the chosen symbol.
+    """
+
+    @abstractmethod
+    def evaluate(self, symbol: str, features_by_tf: dict[str, FeatureSet]) -> Any:
+        """Produce a directional signal from multi-timeframe features."""
+
+    @abstractmethod
+    def score(self, features: FeatureSet, signal_result: Any) -> ScoredCandidate | None:
+        """Convert a positive signal + features into a scored candidate."""
