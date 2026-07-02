@@ -1,12 +1,10 @@
 """crypto_bot — selective multi-coin crypto signal & trading framework.
 
-Stage 1 (this package skeleton): configuration contract, domain enums and
-data types. Data ingestion, indicators, signal engine, risk manager,
-execution and live trading are added in later stages.
+Stage 2 completed: infrastructure (data feed, indicators, features,
+strategy scaffold, storage), orchestrator and CLI entrypoint.
 
-IMPORTANT: This software does NOT guarantee profit and trading involves
-substantial risk of loss. Use signal-only/paper modes until thoroughly tested.
+Live trading remains disabled until paper trading + tests are validated.
 """
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 __all__ = ["__version__"]
