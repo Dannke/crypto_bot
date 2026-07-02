@@ -1,0 +1,127 @@
+"""P&L calculator: tracks and calculates profit and loss for paper trading.
+
+Provides comprehensive P&L tracking including realized and unrealized
+gains/losses, win rate, and performance metrics.
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .paper_position import PaperPosition
+
+
+@dataclass(frozen=True, slots=True)
+class PnLSummary:
+    """Summary of P&L performance over a period."""
+
+    total_trades: int = 0
+    winning_trades: int = 0
+    losing_trades: int = 0
+    win_rate: float = 0.0
+    total_pnl_abs: float = 0.0
+    total_pnl_pct: float = 0.0
+    avg_win_pct: float = 0.0
+    avg_loss_pct: float = 0.0
+    max_drawdown_pct: float = 0.0
+    max_profit_pct: float = 0.0
+    sharpe_ratio: float = 0.0
+
+
+@dataclass(slots=True)
+class PnLTracker:
+    """Tracks P&L across multiple positions for paper trading."""
+
+    positions: list[PaperPosition] = field(default_factory=list)
+    initial_equity: float = 10000.0
+    current_equity: float = 10000.0
+    peak_equity: float = 10000.0
+    equity_history: list[tuple[datetime, float]] = field(default_factory=list)
+
+    def add_position(self, position: PaperPosition) -> None:
+        """Add a position to the tracker."""
+        self.positions.append(position)
+        self._update_equity()
+
+    def close_position(self, position: PaperPosition, exit_price: float) -> None:
+        """Close a position and update P&L."""
+        position.close(exit_price)
+        self._update_equity()
+        self.equity_history.append((datetime.now(tz=UTC), self.current_equity))
+
+    def _update_equity(self) -> None:
+        """Update current equity based on closed positions."""
+        realized_pnl = sum(p.pnl_abs or 0.0 for p in self.positions if p.is_closed)
+        self.current_equity = self.initial_equity + realized_pnl
+        self.peak_equity = max(self.peak_equity, self.current_equity)
+
+    def get_summary(self) -> PnLSummary:
+        """Calculate P&L summary statistics."""
+        closed_positions = [p for p in self.positions if p.is_closed]
+
+        if not closed_positions:
+            return PnLSummary()
+
+        total_trades = len(closed_positions)
+        winning_trades = sum(1 for p in closed_positions if (p.pnl_pct or 0) > 0)
+        losing_trades = total_trades - winning_trades
+
+        win_rate = winning_trades / total_trades if total_trades > 0 else 0.0
+
+        total_pnl_abs = sum(p.pnl_abs or 0.0 for p in closed_positions)
+        total_pnl_pct = (total_pnl_abs / self.initial_equity) * 100.0
+
+        wins = [p.pnl_pct or 0.0 for p in closed_positions if (p.pnl_pct or 0) > 0]
+        losses = [p.pnl_pct or 0.0 for p in closed_positions if (p.pnl_pct or 0) < 0]
+
+        avg_win_pct = sum(wins) / len(wins) if wins else 0.0
+        avg_loss_pct = sum(losses) / len(losses) if losses else 0.0
+
+        # Calculate max drawdown
+        max_drawdown_pct = 0.0
+        if len(self.equity_history) > 1:
+            peak = self.peak_equity
+            for _, equity in self.equity_history:
+                drawdown = (peak - equity) / peak * 100.0
+                max_drawdown_pct = max(max_drawdown_pct, drawdown)
+
+        # Calculate max profit
+        max_profit_pct = (self.peak_equity - self.initial_equity) / self.initial_equity * 100.0
+
+        # Calculate Sharpe ratio (simplified)
+        sharpe_ratio = 0.0
+        if len(self.equity_history) > 1 and total_pnl_pct != 0:
+            # Simplified Sharpe: return / max_drawdown (not statistically rigorous but useful)
+            sharpe_ratio = total_pnl_pct / max_drawdown_pct if max_drawdown_pct > 0 else 0.0
+
+        return PnLSummary(
+            total_trades=total_trades,
+            winning_trades=winning_trades,
+            losing_trades=losing_trades,
+            win_rate=round(win_rate, 4),
+            total_pnl_abs=round(total_pnl_abs, 2),
+            total_pnl_pct=round(total_pnl_pct, 2),
+            avg_win_pct=round(avg_win_pct, 2),
+            avg_loss_pct=round(avg_loss_pct, 2),
+            max_drawdown_pct=round(max_drawdown_pct, 2),
+            max_profit_pct=round(max_profit_pct, 2),
+            sharpe_ratio=round(sharpe_ratio, 2),
+        )
+
+    def get_open_positions_pnl(self, current_prices: dict[str, float]) -> dict[str, float]:
+        """Get unrealized P&L for all open positions.
+
+        Args:
+            current_prices: Dictionary of symbol -> current price.
+
+        Returns:
+            Dictionary of symbol -> unrealized P&L percentage.
+        """
+        unrealized = {}
+        for position in self.positions:
+            if position.is_open and position.symbol in current_prices:
+                current_price = current_prices[position.symbol]
+                unrealized[position.symbol] = position.unrealized_pnl_pct(current_price)
+        return unrealized

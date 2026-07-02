@@ -1,0 +1,196 @@
+"""Decision pipeline: orchestrates the complete decision-making process.
+
+The pipeline coordinates all components to transform raw market data into
+final trading decisions. It serves as the main entry point for the
+decision intelligence layer.
+"""
+from __future__ import annotations
+
+from typing import Any
+
+from ..core.types import FeatureSet
+from ..decision.decision_report import DecisionReport
+from ..decision.explanation import ExplanationGenerator
+from ..future.fusion import ClassicalOnlyFusion, FusionEngine, FusedDecision
+from ..ml.predictor import Predictor
+from ..pipeline.candidate_builder import CandidateBuilder
+from ..pipeline.candidate_selector import CandidateSelector, SelectionConfig
+from ..strategy.base import Strategy
+
+
+class DecisionPipeline:
+    """Main pipeline for generating trading decisions.
+
+    The pipeline orchestrates:
+    1. Candidate building (filters, scoring, strategy evaluation)
+    2. Candidate selection (ranking, thresholds)
+    3. Decision fusion (classical + ML)
+    4. Decision reporting (explainable output)
+
+    This is the primary interface for the decision intelligence layer.
+    """
+
+    def __init__(
+        self,
+        builder: CandidateBuilder | None = None,
+        selector: CandidateSelector | None = None,
+        fusion_engine: FusionEngine | None = None,
+        ml_predictor: Predictor | None = None,
+        explanation_generator: Any = None,
+    ) -> None:
+        self._builder = builder or CandidateBuilder()
+        self._selector = selector or CandidateSelector()
+        self._fusion_engine = fusion_engine or ClassicalOnlyFusion()
+        self._ml_predictor = ml_predictor or Predictor()
+        self._explanation_generator = explanation_generator or ExplanationGenerator()
+
+    def process(
+        self,
+        features_by_symbol: dict[str, dict[str, FeatureSet]],
+        strategy: Strategy,
+        selection_config: SelectionConfig | None = None,
+    ) -> dict[str, Any]:
+        """Process feature sets and generate trading decisions.
+
+        Args:
+            features_by_symbol: Dictionary of symbol -> features by timeframe.
+            strategy: Strategy instance for evaluation.
+            selection_config: Optional selection configuration.
+
+        Returns:
+            Dictionary with processing results including selected candidates,
+            rejected candidates, and statistics.
+        """
+        # Update selector config if provided
+        if selection_config:
+            self._selector = CandidateSelector(selection_config)
+
+        # Build candidates
+        accepted_reports, rejected_reports = self._builder.build_batch(
+            features_by_symbol,
+            strategy,
+        )
+
+        # Select best candidates
+        selected = self._selector.select(accepted_reports)
+
+        # Apply fusion (currently classical only)
+        fused_decisions = []
+        for report in selected:
+            fused = self._apply_fusion(report)
+            fused_decisions.append(fused)
+
+        # Generate explanations
+        for report in selected:
+            report.explanation = self._explanation_generator.generate(report)
+
+        # Compile results
+        stats = self._selector.get_selection_stats(accepted_reports, selected)
+
+        return {
+            "selected": selected,
+            "rejected": rejected_reports,
+            "fused_decisions": fused_decisions,
+            "stats": stats,
+            "total_processed": len(features_by_symbol),
+        }
+
+    def process_single(
+        self,
+        symbol: str,
+        features_by_tf: dict[str, FeatureSet],
+        strategy: Strategy,
+    ) -> DecisionReport | None:
+        """Process a single symbol and generate a decision.
+
+        Args:
+            symbol: Symbol to process.
+            features_by_tf: Features by timeframe.
+            strategy: Strategy instance for evaluation.
+
+        Returns:
+            DecisionReport if accepted, None if rejected.
+        """
+        accepted_report, rejected_reports = self._builder.build(
+            symbol,
+            features_by_tf,
+            strategy,
+        )
+
+        if accepted_report:
+            # Apply fusion
+            fused = self._apply_fusion(accepted_report)
+            # Generate explanation
+            accepted_report.explanation = self._explanation_generator.generate(accepted_report)
+            return accepted_report
+
+        return None
+
+    def _apply_fusion(self, report: DecisionReport) -> FusedDecision:
+        """Apply fusion engine to a decision report.
+
+        Args:
+            report: Decision report to fuse.
+
+        Returns:
+            FusedDecision with combined signal.
+        """
+        # Get ML prediction (stub for now)
+        ml_prediction = None
+        if self._ml_predictor.is_enabled:
+            # Extract features for ML
+            features = report.features
+            ml_prediction = self._ml_predictor.predict(features)
+
+        # Apply fusion
+        fused = self._fusion_engine.fuse(
+            classical_signal=report.signal,
+            classical_side=report.side,
+            classical_confidence=report.confidence,
+            ml_prediction=ml_prediction,
+            ml_weight=0.0,  # Currently classical only
+        )
+
+        # Update symbol in fused decision
+        return FusedDecision(
+            symbol=report.symbol,
+            signal=fused.signal,
+            side=fused.side,
+            confidence=fused.confidence,
+            method=fused.method,
+            classical_signal=fused.classical_signal,
+            classical_side=fused.classical_side,
+            classical_confidence=fused.classical_confidence,
+            ml_signal=fused.ml_signal,
+            ml_side=fused.ml_side,
+            ml_confidence=fused.ml_confidence,
+            ml_weight=fused.ml_weight,
+        )
+
+    def enable_ml(self) -> None:
+        """Enable ML predictions in the pipeline."""
+        self._ml_predictor.enable()
+
+    def disable_ml(self) -> None:
+        """Disable ML predictions in the pipeline."""
+        self._ml_predictor.disable()
+
+    @property
+    def builder(self) -> CandidateBuilder:
+        """Get the candidate builder."""
+        return self._builder
+
+    @property
+    def selector(self) -> CandidateSelector:
+        """Get the candidate selector."""
+        return self._selector
+
+    @property
+    def fusion_engine(self) -> FusionEngine:
+        """Get the fusion engine."""
+        return self._fusion_engine
+
+    @property
+    def ml_predictor(self) -> Predictor:
+        """Get the ML predictor."""
+        return self._ml_predictor

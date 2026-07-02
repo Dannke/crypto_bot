@@ -56,7 +56,11 @@ class BookSnapshot:
 # --------------------------------------------------------------------------- #
 @dataclass(slots=True)
 class FeatureSet:
-    """Normalized per-symbol, per-timeframe indicator snapshot."""
+    """Normalized per-symbol, per-timeframe indicator snapshot.
+
+    Extended to support ML-ready features including technical indicators,
+    market microstructure, and future ML inputs (news, on-chain, sentiment).
+    """
 
     symbol: str
     timeframe: str
@@ -70,6 +74,42 @@ class FeatureSet:
     ema_fast: float
     ema_mid: float
     ema_slow: float
+
+    # Extended technical indicators
+    macd: float = 0.0
+    macd_signal: float = 0.0
+    macd_histogram: float = 0.0
+    bb_upper: float = 0.0
+    bb_mid: float = 0.0
+    bb_lower: float = 0.0
+    bb_position: float = 0.0  # 0..1 position within bands
+    vwap: float = 0.0
+
+    # Market microstructure
+    liquidity_score: float = 0.0  # 0..1 based on volume/depth
+    spread_pct: float = 0.0
+    bid_ask_imbalance: float = 0.0  # -1..1
+
+    # Correlation features
+    correlation_btc: float = 0.0  # correlation with BTC
+    correlation_eth: float = 0.0  # correlation with ETH
+
+    # Market regime
+    market_regime: str = "neutral"  # "bull", "bear", "neutral", "choppy"
+
+    # Future ML inputs (placeholders for now)
+    news_score: float = 0.0
+    on_chain_score: float = 0.0
+    sentiment_score: float = 0.0
+
+    # Raw OHLCV for reference
+    open: float = 0.0
+    high: float = 0.0
+    low: float = 0.0
+    close: float = 0.0
+    volume: float = 0.0
+
+    # Additional metadata
     extras: dict[str, float] = field(default_factory=dict)
 
 
