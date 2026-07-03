@@ -27,6 +27,7 @@ from ..core.exceptions import (
     ExchangeError,
     LiveTradingForbiddenError,
 )
+import asyncio
 from ..core.logging_setup import get_logger
 
 _log = get_logger("data.exchange")
@@ -47,7 +48,7 @@ _FATAL = (
 class _BaseClient:
     """Common ccxt lifecycle + retry plumbing."""
 
-    def __init__(self, config: Config) -> None:
+    def __init__(self, config: Config, *, set_credentials: bool = True) -> None:
         self._config = config
         exchange_name = config.env.exchange_name or config.settings.exchange.name
         sandbox = (
@@ -58,6 +59,9 @@ class _BaseClient:
         opts: dict[str, Any] = {
             "enableRateLimit": True,
             "rateLimit": config.settings.exchange.rate_limit_ms,
+            # Short timeout so a geo-blocked / unreachable exchange fails fast
+            # and the feed falls back to DB cache without blocking for minutes.
+            "timeout": 3000,
             # Bybit's unified API serves multiple market "categories" (spot,
             # linear perpetuals, inverse, option) from the same endpoints.
             # Without this, ccxt's default category for calls like
@@ -68,12 +72,16 @@ class _BaseClient:
             # symbols. This bit us as auto-discover finding 0 symbols.
             "options": {"defaultType": "spot"},
         }
-        # Inject credentials only when provided; ccxt treats empty string as
-        # a credential, which can confuse some exchanges' public endpoints.
-        if config.env.exchange_api_key:
-            opts["apiKey"] = config.env.exchange_api_key
-        if config.env.exchange_api_secret:
-            opts["secret"] = config.env.exchange_api_secret
+        # Inject credentials only when required.
+        # MarketDataClient (public-only) MUST NOT set credentials: on bybit,
+        # load_markets() calls fetch_currencies() (a PRIVATE endpoint) which
+        # will 403/block if credentials are present but invalid/geo-blocked,
+        # making ALL fetch_ohlcv calls fail before any data can be cached.
+        if set_credentials:
+            if config.env.exchange_api_key:
+                opts["apiKey"] = config.env.exchange_api_key
+            if config.env.exchange_api_secret:
+                opts["secret"] = config.env.exchange_api_secret
 
         try:
             self._ex = getattr(ccxt_async, exchange_name)(opts)
@@ -131,31 +139,103 @@ class _BaseClient:
 
 
 class MarketDataClient(_BaseClient):
-    """Public market-data access: OHLCV, ticker, order book, markets."""
+    """Public market-data access: OHLCV, ticker, order book, markets.
+
+    Does NOT set exchange API credentials — all data comes from public
+    endpoints.  Bybit's ccxt implementation calls the private
+    ``fetch_currencies()`` during ``load_markets()`` when credentials are
+    present, which fails on testnet (CloudFront 403).  Not setting credentials
+    allows ``fetch_currencies()`` to short-circuit with ``check_required_credentials(False)``.
+
+    Avoids calling ccxt's ``load_markets()`` entirely by pre-seeding a
+    minimal market registry from the configured universe.  This makes the
+    client start instantly even when the exchange is geo-blocked — every
+    API call can still fail, but the client itself won't.
+    """
+
+    def __init__(self, config: Config) -> None:
+        super().__init__(config, set_credentials=False)
+        # Pre-seed a minimal market registry so ccxt's fetch_ohlcv / fetch_tickers
+        # don't trigger a full load_markets() call (which on bybit makes
+        # multiple slow HTTP requests and can fail outright on a geo-blocked
+        # testnet).  We only need: symbol -> market['id'] (exchange symbol)
+        # and market['spot'] (True for all our pairs).
+        self._seed_markets(config)
+
+    def _seed_markets(self, config: Config) -> None:
+        """Create minimal market entries for the configured universe."""
+        from .feed import build_symbols
+        symbols = build_symbols(config)
+        if not symbols:
+            return
+        quote = config.settings.universe.quote.upper()
+        markets: dict[str, dict[str, Any]] = {}
+        markets_by_id: dict[str, list[dict[str, Any]]] = {}
+        for sym in symbols:
+            base = sym.split("/")[0]
+            exch_id = base + quote  # e.g. "BTCUSDT"
+            entry: dict[str, Any] = {
+                "id": exch_id,
+                "symbol": sym,
+                "base": base,
+                "quote": quote,
+                "active": True,
+                "spot": True,
+                "future": False,
+                "swap": False,
+                "option": False,
+                "type": "spot",
+                "linear": False,
+                "inverse": False,
+                "precision": {"price": 8, "amount": 8},
+                "limits": {"amount": {"min": 1e-8, "max": 1e8}},
+                "info": {},
+            }
+            markets[sym] = entry
+            markets_by_id[exch_id] = [entry]
+        self._ex.markets = markets
+        self._ex.markets_by_id = markets_by_id
+        _log.info("seeded %d synthetic market entries (no API call)", len(markets))
 
     async def load_markets(self) -> dict[str, Any]:
-        return cast(dict[str, Any], await self._with_retry("load_markets", self._ex.load_markets))
+        """Return pre-seeded markets without making any API call."""
+        return cast(dict[str, Any], self._ex.markets or {})
 
     async def fetch_ohlcv(
         self, symbol: str, timeframe: str, limit: int = 200, since: int | None = None
     ) -> list[list[Any]]:
+        """Fetch OHLCV data.  Fails fast — caller (feed) falls back to DB cache."""
         limit = max(1, min(int(limit), policy.MAX_CANDLES_LOOKBACK))
-        rows = await self._with_retry(
-            "fetch_ohlcv", self._ex.fetch_ohlcv, symbol, timeframe, since, limit
-        )
-        return cast(list[list[Any]], rows or [])
+        try:
+            rows = await self._ex.fetch_ohlcv(symbol, timeframe, since, limit)
+            return cast(list[list[Any]], rows or [])
+        except Exception as exc:
+            raise DataFeedError(f"fetch_ohlcv failed for {symbol} {timeframe}: {exc}") from exc
 
     async def fetch_ticker(self, symbol: str) -> dict[str, Any]:
-        return cast(dict[str, Any], await self._with_retry("fetch_ticker", self._ex.fetch_ticker, symbol))
+        return cast(dict[str, Any], await self._ex.fetch_ticker(symbol))
 
     async def fetch_order_book(self, symbol: str, limit: int = 50) -> dict[str, Any]:
         return cast(
             dict[str, Any],
-            await self._with_retry("fetch_order_book", self._ex.fetch_order_book, symbol, limit),
+            await self._ex.fetch_order_book(symbol, limit),
         )
 
     async def fetch_tickers(self, symbols: list[str] | None = None) -> dict[str, Any]:
-        return cast(dict[str, Any], await self._with_retry("fetch_tickers", self._ex.fetch_tickers, symbols))
+        """Fetch tickers.  Returns empty dict on failure (feed falls back to DB cache)."""
+        try:
+            return cast(dict[str, Any], await asyncio.wait_for(
+                self._ex.fetch_tickers(symbols), timeout=15,
+            ))
+        except asyncio.TimeoutError:
+            _log.warning("fetch_tickers timed out after 15s (will use DB fallback)")
+            return {}
+        except Exception as exc:
+            _log.warning(
+                "fetch_tickers failed (will use DB fallback): [%s] %s",
+                type(exc).__name__, exc,
+            )
+            return {}
 
     async def available_symbols(self) -> set[str]:
         """All symbols the exchange currently lists (mainnet vs testnet differ).
@@ -165,9 +245,15 @@ class MarketDataClient(_BaseClient):
         set, and asking for a delisted/unlisted symbol raises ``ccxt.BadSymbol``,
         which is a hard, non-retryable error that would otherwise abort the
         whole scan cycle for every symbol, not just the missing one.
+
+        Raises ``ExchangeError`` on failure so ``resolve_symbols`` can
+        distinguish "no symbols exist" from "exchange is unreachable" and
+        fall back to the explicit watchlist (DB cache mode).
         """
         markets = await self.load_markets()
-        return set(markets.keys())
+        if markets:
+            return set(markets.keys())
+        raise ExchangeError("markets loaded but empty")
 
 
 class ExecutionClient(_BaseClient):

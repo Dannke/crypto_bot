@@ -67,53 +67,63 @@ async def run_orchestrator(config: Config) -> None:
                 logger.info("Starting scan cycle at %s", datetime.now(tz=UTC).isoformat())
 
                 try:
-                    symbols = await resolve_symbols(client, config)
+                    symbols = await resolve_symbols(client, config, feed.exchange_available)
                     if not symbols:
                         logger.warning("Universe is empty; skipping cycle")
-                    else:
+                        continue
+
+                    if feed.exchange_available:
                         tickers = await client.fetch_tickers(symbols)
-                        market_by_symbol = {
-                            sym: market_context_from_ticker(tickers.get(sym, {}))
-                            for sym in symbols
-                        }
+                        if tickers:
+                            feed.exchange_available = True
+                        else:
+                            logger.warning("No tickers from exchange; using DB cache fallback")
+                            feed.exchange_available = False
+                    else:
+                        tickers = {}
 
-                        feeds = await feed.fetch_many(symbols)
-                        symbol_candles = {f.symbol: f.by_timeframe for f in feeds}
+                    market_by_symbol = {
+                        sym: market_context_from_ticker(tickers.get(sym, {}))
+                        for sym in symbols
+                    }
 
-                        features_by_symbol = build_features_batch(
-                            symbol_candles,
-                            feature_builder,
-                            market_by_symbol,
-                            quote=quote,
-                            trigger_tf=trigger_tf,
-                        )
+                    feeds = await feed.fetch_many(symbols)
+                    symbol_candles = {f.symbol: f.by_timeframe for f in feeds}
 
-                        result = pipeline.process(features_by_symbol, strategy)
-                        stats: dict[str, Any] = result["stats"]
+                    features_by_symbol = build_features_batch(
+                        symbol_candles,
+                        feature_builder,
+                        market_by_symbol,
+                        quote=quote,
+                        trigger_tf=trigger_tf,
+                    )
+
+                    result = pipeline.process(features_by_symbol, strategy)
+                    stats: dict[str, Any] = result["stats"]
+                    logger.info(
+                        "Cycle stats: processed=%d selected=%d rejected=%d avg_score=%.1f",
+                        result["total_processed"],
+                        stats.get("selected_count", 0),
+                        stats.get("rejected_count", 0),
+                        stats.get("avg_score", 0.0),
+                    )
+                    reject_reasons = stats.get("reject_reasons") or {}
+                    if reject_reasons:
+                        logger.info("Reject reasons: %s", reject_reasons)
+
+                    for report in result["selected"]:
+                        exec_result = executor.handle_selected(report)
                         logger.info(
-                            "Cycle stats: processed=%d selected=%d rejected=%d avg_score=%.1f",
-                            result["total_processed"],
-                            stats.get("selected_count", 0),
-                            stats.get("rejected_count", 0),
-                            stats.get("avg_score", 0.0),
+                            "%s %s score=%.1f conf=%.2f — %s",
+                            report.signal.value,
+                            report.symbol,
+                            report.total_score,
+                            report.confidence,
+                            exec_result.message,
                         )
-                        reject_reasons = stats.get("reject_reasons") or {}
-                        if reject_reasons:
-                            logger.info("Reject reasons: %s", reject_reasons)
 
-                        for report in result["selected"]:
-                            exec_result = executor.handle_selected(report)
-                            logger.info(
-                                "%s %s score=%.1f conf=%.2f — %s",
-                                report.signal.value,
-                                report.symbol,
-                                report.total_score,
-                                report.confidence,
-                                exec_result.message,
-                            )
-
-                        for report in result["rejected"]:
-                            executor.handle_rejected(_normalize_rejected(report))
+                    for report in result["rejected"]:
+                        executor.handle_rejected(_normalize_rejected(report))
 
                 except Exception as exc:  # noqa: BLE001
                     logger.error("Cycle error: %s", exc, exc_info=True)

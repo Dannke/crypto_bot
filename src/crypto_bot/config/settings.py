@@ -78,11 +78,15 @@ def _apply_env_overrides(settings: Settings, env: EnvConfig) -> Settings:
         data["exchange"]["sandbox"] = env.exchange_sandbox
 
     if env.db_path:
+        if data["storage"].get("db_path") != env.db_path:
+            print(f"[config] .env overrides db_path: {data['storage'].get('db_path')!r} -> {env.db_path!r}")
         data["storage"]["db_path"] = env.db_path
 
     if env.log_level:
         data["logging"]["level"] = env.log_level
     if env.log_file:
+        if data["logging"].get("file") != env.log_file:
+            print(f"[config] .env overrides log_file: {data['logging'].get('file')!r} -> {env.log_file!r}")
         data["logging"]["file"] = env.log_file
     if env.log_json is not None:
         data["logging"]["json_logs"] = env.log_json

@@ -93,6 +93,9 @@ async def discover_symbols(client: MarketDataClient, config: Config) -> list[str
     quote = u.quote.strip().upper()
     excluded = {x.strip().upper() for x in u.exclude if x.strip()}
     tickers = await client.fetch_tickers(None)
+    if not tickers:
+        _log.info("auto_discover: no tickers from exchange, skipping discovery")
+        return []
 
     # Diagnostic breakdown: on some exchange endpoints (notably testnet),
     # most listed markets are derivatives (e.g. "BTC/USDT:USDT") rather than
@@ -131,7 +134,7 @@ async def discover_symbols(client: MarketDataClient, config: Config) -> list[str
     return [symbol for _, symbol in ranked[: u.auto_discover.top_n]]
 
 
-async def resolve_symbols(client: MarketDataClient, config: Config) -> list[str]:
+async def resolve_symbols(client: MarketDataClient, config: Config, exchange_available: bool = True) -> list[str]:
     """Merge explicit watchlist symbols with auto-discovered high-liquidity pairs.
 
     The explicit watchlist is user-curated YAML and is NOT guaranteed to match
@@ -145,19 +148,42 @@ async def resolve_symbols(client: MarketDataClient, config: Config) -> list[str]
     Auto-discovered symbols never need this filter: they are derived directly
     from tickers the exchange itself returned, so they are available by
     construction.
+
+    Graceful degradation: if the exchange API is unreachable (geo-blocked,
+    DNS failure, etc.) the explicit watchlist is returned as-is so the
+    orchestrator can still reach ``feed.fetch_many`` which falls back to
+    its DB cache for candles.
     """
     explicit = build_symbols(config)
 
-    available = await client.available_symbols()
-    missing = [s for s in explicit if s not in available]
-    if missing:
-        _log.warning(
-            "universe: %d symbol(s) not listed on this exchange endpoint, skipping: %s",
-            len(missing), missing,
-        )
-    explicit = [s for s in explicit if s in available]
+    if exchange_available:
+        try:
+            available = await client.available_symbols()
+        except Exception as exc:
+            _log.warning(
+                "resolve_symbols: cannot check available symbols (%s); "
+                "using explicit watchlist as-is (DB cache fallback)",
+                exc,
+            )
+            available = None
+    else:
+        available = None
 
-    discovered = await discover_symbols(client, config)
+    if available is not None:
+        missing = [s for s in explicit if s not in available]
+        if missing:
+            _log.warning(
+                "universe: %d symbol(s) not listed on this exchange endpoint, skipping: %s",
+                len(missing), missing,
+            )
+        explicit = [s for s in explicit if s in available]
+    else:
+        _log.info(
+            "resolve_symbols: exchange unavailable, keeping %d explicit symbols",
+            len(explicit),
+        )
+
+    discovered = [] if available is None else await discover_symbols(client, config)
 
     seen: set[str] = set()
     resolved: list[str] = []
@@ -196,7 +222,13 @@ def _sort_dedup(candles: list[Candle]) -> list[Candle]:
 
 
 class Feed:
-    """Fetches candle history across the configured timeframes with DB caching."""
+    """Fetches candle history across the configured timeframes with DB caching.
+
+    When the exchange is unreachable (geo-blocked, DNS failure, etc.) the feed
+    silently falls back to whatever candles are already cached in the DB.
+    Callers can set ``exchange_available`` to ``False`` to skip all API calls
+    and use the DB cache only, avoiding slow HTTP timeouts.
+    """
 
     def __init__(self, client: MarketDataClient, config: Config, db: Database | None = None) -> None:
         self._client = client
@@ -205,69 +237,82 @@ class Feed:
         self._limit = config.settings.timeframes.candles_per_tf
         self._db = db
         self._candle_repo = CandleRepository(db) if db else None
+        self._exchange_available = True
+
+    @property
+    def exchange_available(self) -> bool:
+        return self._exchange_available
+
+    @exchange_available.setter
+    def exchange_available(self, value: bool) -> None:
+        self._exchange_available = value
 
     async def fetch_symbol(self, symbol: str) -> SymbolFeed:
         """Fetch all timeframes for one symbol, concurrently with DB caching."""
         async def _one(tf: str) -> tuple[str, list[Candle]]:
             # Try to get candles from DB first
-            db_candles = []
-            latest_ts = None
+            db_candles: list[Candle] = []
+            latest_ts: int | None = None
             
             if self._candle_repo:
                 latest_ts = await self._candle_repo.latest_ts_async(symbol, tf)
                 if latest_ts is not None:
-                    # Fetch from DB
                     db_candles = await self._candle_repo.fetch_async(symbol, tf, limit=self._limit)
-                    _log.debug(
+                    _log.info(
                         "feed: loaded %d candles from DB for %s %s (latest_ts=%d)",
                         len(db_candles), symbol, tf, latest_ts,
                     )
                 else:
-                    _log.debug(
+                    _log.info(
                         "feed: no DB data for %s %s, will fetch full history from API",
                         symbol, tf,
                     )
             else:
                 _log.warning("feed: candle repository not available, DB caching disabled")
             
-            # Fetch new candles from API (only if we have DB data, otherwise fetch full history)
-            if latest_ts is not None:
-                # Fetch only candles after latest_ts
-                # ccxt fetch_ohlcv with 'since' parameter
-                raw = await self._client.fetch_ohlcv(symbol, tf, limit=self._limit, since=latest_ts)
-                new_candles = _sort_dedup([_row_to_candle(r) for r in raw])
-                
-                # Filter out candles that are already in DB (ccxt may return some overlap)
-                if new_candles:
-                    new_candles = [c for c in new_candles if c.timestamp > latest_ts]
-                
-                _log.debug(
-                    "feed: fetched %d new candles from API for %s %s (since=%d)",
-                    len(new_candles), symbol, tf, latest_ts,
-                )
+            # Try fetching new candles from API (skip if exchange is known down)
+            fetched_new: list[Candle] = []
+            if self._exchange_available:
+                try:
+                    if latest_ts is not None:
+                        raw = await self._client.fetch_ohlcv(symbol, tf, limit=self._limit, since=latest_ts)
+                        fetched_new = _sort_dedup([_row_to_candle(r) for r in raw])
+                        if fetched_new:
+                            fetched_new = [c for c in fetched_new if c.timestamp > latest_ts]
+                        _log.info(
+                            "feed: fetched %d new candles from API for %s %s (since=%d)",
+                            len(fetched_new), symbol, tf, latest_ts,
+                        )
+                    else:
+                        raw = await self._client.fetch_ohlcv(symbol, tf, limit=self._limit)
+                        fetched_new = _sort_dedup([_row_to_candle(r) for r in raw])
+                        _log.info(
+                            "feed: fetched %d candles from API for %s %s (full fetch)",
+                            len(fetched_new), symbol, tf,
+                        )
+                except Exception as exc:
+                    _log.warning(
+                        "feed: API fetch failed for %s %s, using DB cache only (%d candles): %s",
+                        symbol, tf, len(db_candles), exc,
+                    )
+                    self._exchange_available = False
             else:
-                # No DB data, fetch full history
-                raw = await self._client.fetch_ohlcv(symbol, tf, limit=self._limit)
-                new_candles = _sort_dedup([_row_to_candle(r) for r in raw])
-                _log.debug(
-                    "feed: fetched %d candles from API for %s %s (no DB data)",
-                    len(new_candles), symbol, tf,
+                _log.info(
+                    "feed: exchange unavailable, using DB cache only for %s %s (%d candles)",
+                    symbol, tf, len(db_candles),
                 )
             
-            # Combine DB candles with new candles
-            all_candles = db_candles + new_candles
+            all_candles = db_candles + fetched_new
             all_candles = _sort_dedup(all_candles)
             
-            # Keep only the most recent candles (up to limit)
             if len(all_candles) > self._limit:
                 all_candles = all_candles[-self._limit:]
             
-            # Save new candles to DB
-            if new_candles and self._candle_repo:
-                await self._candle_repo.upsert_many_async(symbol, tf, new_candles)
-                _log.debug(
+            if fetched_new and self._candle_repo:
+                await self._candle_repo.upsert_many_async(symbol, tf, fetched_new)
+                _log.info(
                     "feed: saved %d candles to DB for %s %s",
-                    len(new_candles), symbol, tf,
+                    len(fetched_new), symbol, tf,
                 )
             
             return tf, all_candles
@@ -282,6 +327,11 @@ class Feed:
         the bot's whole point is to scan a wide universe, so one outage must
         not blank the rest.
         """
+        import sys as _sys
+        _sys.stderr.write("[DBG] fetch_many called with %d symbols\n" % len(list(symbols)))
+        _sys.stderr.flush()
+        symbols = list(symbols)  # materialise once
+
         async def _safe(sym: str) -> SymbolFeed | None:
             try:
                 return await self.fetch_symbol(sym)

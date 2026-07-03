@@ -27,7 +27,7 @@ runtime:
 exchange:
   name: bybit
   sandbox: true             # use testnet endpoints
-  rate_limit_ms: 1200
+  rate_limit_ms: 200
 
 timeframes:
   primary: ["15m", "1h", "4h"]
