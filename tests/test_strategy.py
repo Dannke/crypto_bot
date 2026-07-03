@@ -9,12 +9,12 @@ from crypto_bot.strategy import Scorer, SignalEngine, StrategyContext, select_to
 def _ctx(min_score: float = 65.0, min_confidence: float = 0.6) -> StrategyContext:
     return StrategyContext(
         scoring_weights={
-            "trend": 0.30,
-            "momentum": 0.20,
+            "trend": 0.25,
+            "momentum": 0.15,
             "volume": 0.15,
-            "setup": 0.15,
-            "reward_risk": 0.15,
-            "liquidity": 0.05,
+            "spread": 0.05,
+            "risk": 0.20,
+            "liquidity": 0.10,
         },
         min_score=min_score,
         min_confidence=min_confidence,
@@ -24,6 +24,7 @@ def _ctx(min_score: float = 65.0, min_confidence: float = 0.6) -> StrategyContex
         atr_min_pct=0.5,
         atr_max_pct=8.0,
         take_profit_risk_multiple=2.0,
+        max_stop_distance_pct=3.0,
     )
 
 

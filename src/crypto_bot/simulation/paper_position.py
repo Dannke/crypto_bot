@@ -38,7 +38,6 @@ class PaperPosition:
         """Whether the position has been closed."""
         return self.status == TradeStatus.CLOSED
 
-    @property
     def unrealized_pnl_pct(self, current_price: float) -> float:
         """Calculate unrealized P&L as percentage of entry."""
         if not self.is_open:
@@ -46,10 +45,8 @@ class PaperPosition:
 
         if self.side == Side.LONG:
             return ((current_price - self.entry_price) / self.entry_price) * 100.0
-        else:  # SHORT
-            return ((self.entry_price - current_price) / self.entry_price) * 100.0
+        return ((self.entry_price - current_price) / self.entry_price) * 100.0
 
-    @property
     def unrealized_pnl_abs(self, current_price: float) -> float:
         """Calculate unrealized P&L in quote currency."""
         if not self.is_open:
@@ -57,8 +54,7 @@ class PaperPosition:
 
         if self.side == Side.LONG:
             return (current_price - self.entry_price) * self.size
-        else:  # SHORT
-            return (self.entry_price - current_price) * self.size
+        return (self.entry_price - current_price) * self.size
 
     def close(self, exit_price: float, exit_time: datetime | None = None) -> None:
         """Close the position at the given price."""

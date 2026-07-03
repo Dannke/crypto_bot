@@ -191,3 +191,13 @@ def validate_all(config: Config) -> None:
     validate_universe(config)
     validate_mode_compatibility(config)
     # validate_live_gate is invoked transitively when mode == LIVE.
+
+
+def validate_runtime_safety(config: Config) -> None:
+    """Entry point called from ``cli.py`` before the orchestrator starts.
+
+    Thin wrapper around :func:`validate_all` — kept as a separate name so the
+    CLI's intent ("make sure it's safe to run") is explicit at the call site,
+    independent of how the validation suite is internally organised.
+    """
+    validate_all(config)

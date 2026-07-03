@@ -25,6 +25,7 @@ from ..core.exceptions import DataFeedError
 from ..core.logging_setup import get_logger
 from ..core.types import Candle
 from .exchange import MarketDataClient
+from ..storage.db import Database, CandleRepository
 
 _log = get_logger("data.feed")
 
@@ -92,6 +93,29 @@ async def discover_symbols(client: MarketDataClient, config: Config) -> list[str
     quote = u.quote.strip().upper()
     excluded = {x.strip().upper() for x in u.exclude if x.strip()}
     tickers = await client.fetch_tickers(None)
+
+    # Diagnostic breakdown: on some exchange endpoints (notably testnet),
+    # most listed markets are derivatives (e.g. "BTC/USDT:USDT") rather than
+    # spot pairs, and _base_for_symbol() intentionally excludes anything with
+    # a ":" in it — a spot-only universe has no business auto-discovering
+    # perpetual futures. If that's what's happening, auto_discover silently
+    # returns an empty list, which looks identical to "no liquid symbols
+    # exist" from the caller's side. Log the split so it's diagnosable.
+    total = len(tickers)
+    spot_like = sum(1 for sym in tickers if _base_for_symbol(sym, quote) is not None)
+    if total and spot_like == 0:
+        _log.warning(
+            "auto_discover: exchange returned %d tickers but none matched "
+            "'<BASE>/%s' spot format (no ':' allowed) — likely a derivatives-"
+            "only endpoint for this quote currency. Auto-discover will add 0 symbols.",
+            total, quote,
+        )
+    elif total:
+        _log.info(
+            "auto_discover: %d/%d tickers match spot format '<BASE>/%s'",
+            spot_like, total, quote,
+        )
+
     ranked: list[tuple[float, str]] = []
     for symbol, ticker in tickers.items():
         base = _base_for_symbol(symbol, quote)
@@ -108,15 +132,44 @@ async def discover_symbols(client: MarketDataClient, config: Config) -> list[str
 
 
 async def resolve_symbols(client: MarketDataClient, config: Config) -> list[str]:
-    """Merge explicit watchlist symbols with auto-discovered high-liquidity pairs."""
+    """Merge explicit watchlist symbols with auto-discovered high-liquidity pairs.
+
+    The explicit watchlist is user-curated YAML and is NOT guaranteed to match
+    what the exchange actually lists on the active endpoint — this matters a
+    lot on testnet, whose market set is a small subset of mainnet's. Symbols
+    absent from the exchange are dropped here (with a warning) rather than
+    left to blow up ``fetch_tickers``/``fetch_ohlcv`` later with a hard,
+    non-retryable ``ccxt.BadSymbol`` that would otherwise abort the whole
+    scan cycle instead of just skipping the one bad symbol.
+
+    Auto-discovered symbols never need this filter: they are derived directly
+    from tickers the exchange itself returned, so they are available by
+    construction.
+    """
     explicit = build_symbols(config)
+
+    available = await client.available_symbols()
+    missing = [s for s in explicit if s not in available]
+    if missing:
+        _log.warning(
+            "universe: %d symbol(s) not listed on this exchange endpoint, skipping: %s",
+            len(missing), missing,
+        )
+    explicit = [s for s in explicit if s in available]
+
     discovered = await discover_symbols(client, config)
+
     seen: set[str] = set()
     resolved: list[str] = []
     for symbol in [*explicit, *discovered]:
         if symbol not in seen:
             seen.add(symbol)
             resolved.append(symbol)
+
+    _log.info(
+        "universe resolved: %d explicit + %d discovered = %d total (after de-dup)",
+        len(explicit), len(discovered), len(resolved),
+    )
     return resolved
 
 
@@ -143,20 +196,81 @@ def _sort_dedup(candles: list[Candle]) -> list[Candle]:
 
 
 class Feed:
-    """Fetches candle history across the configured timeframes."""
+    """Fetches candle history across the configured timeframes with DB caching."""
 
-    def __init__(self, client: MarketDataClient, config: Config) -> None:
+    def __init__(self, client: MarketDataClient, config: Config, db: Database | None = None) -> None:
         self._client = client
         self._config = config
         self._timeframes = config.settings.timeframes.primary
         self._limit = config.settings.timeframes.candles_per_tf
+        self._db = db
+        self._candle_repo = CandleRepository(db) if db else None
 
     async def fetch_symbol(self, symbol: str) -> SymbolFeed:
-        """Fetch all timeframes for one symbol, concurrently."""
+        """Fetch all timeframes for one symbol, concurrently with DB caching."""
         async def _one(tf: str) -> tuple[str, list[Candle]]:
-            raw = await self._client.fetch_ohlcv(symbol, tf, limit=self._limit)
-            candles = _sort_dedup([_row_to_candle(r) for r in raw])
-            return tf, candles
+            # Try to get candles from DB first
+            db_candles = []
+            latest_ts = None
+            
+            if self._candle_repo:
+                latest_ts = await self._candle_repo.latest_ts_async(symbol, tf)
+                if latest_ts is not None:
+                    # Fetch from DB
+                    db_candles = await self._candle_repo.fetch_async(symbol, tf, limit=self._limit)
+                    _log.debug(
+                        "feed: loaded %d candles from DB for %s %s (latest_ts=%d)",
+                        len(db_candles), symbol, tf, latest_ts,
+                    )
+                else:
+                    _log.debug(
+                        "feed: no DB data for %s %s, will fetch full history from API",
+                        symbol, tf,
+                    )
+            else:
+                _log.warning("feed: candle repository not available, DB caching disabled")
+            
+            # Fetch new candles from API (only if we have DB data, otherwise fetch full history)
+            if latest_ts is not None:
+                # Fetch only candles after latest_ts
+                # ccxt fetch_ohlcv with 'since' parameter
+                raw = await self._client.fetch_ohlcv(symbol, tf, limit=self._limit, since=latest_ts)
+                new_candles = _sort_dedup([_row_to_candle(r) for r in raw])
+                
+                # Filter out candles that are already in DB (ccxt may return some overlap)
+                if new_candles:
+                    new_candles = [c for c in new_candles if c.timestamp > latest_ts]
+                
+                _log.debug(
+                    "feed: fetched %d new candles from API for %s %s (since=%d)",
+                    len(new_candles), symbol, tf, latest_ts,
+                )
+            else:
+                # No DB data, fetch full history
+                raw = await self._client.fetch_ohlcv(symbol, tf, limit=self._limit)
+                new_candles = _sort_dedup([_row_to_candle(r) for r in raw])
+                _log.debug(
+                    "feed: fetched %d candles from API for %s %s (no DB data)",
+                    len(new_candles), symbol, tf,
+                )
+            
+            # Combine DB candles with new candles
+            all_candles = db_candles + new_candles
+            all_candles = _sort_dedup(all_candles)
+            
+            # Keep only the most recent candles (up to limit)
+            if len(all_candles) > self._limit:
+                all_candles = all_candles[-self._limit:]
+            
+            # Save new candles to DB
+            if new_candles and self._candle_repo:
+                await self._candle_repo.upsert_many_async(symbol, tf, new_candles)
+                _log.debug(
+                    "feed: saved %d candles to DB for %s %s",
+                    len(new_candles), symbol, tf,
+                )
+            
+            return tf, all_candles
 
         results = await asyncio.gather(*[_one(tf) for tf in self._timeframes])
         return SymbolFeed(symbol=symbol, by_timeframe=dict(results))

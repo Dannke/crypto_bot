@@ -7,11 +7,41 @@ from __future__ import annotations
 
 from typing import Any
 
+from ..core.enums import RejectReason
 from ..core.types import FeatureSet, SignalResult
 from ..decision.decision_report import DecisionReport
-from ..filters.base import Filter
+from ..filters.base import Filter, FilterResult
 from ..scoring.score_engine import ScoreEngine, ScoreResult
 from ..strategy.base import Strategy
+
+
+_FILTER_REJECT: dict[str, RejectReason] = {
+    "insufficient_liquidity": RejectReason.INSUFFICIENT_LIQUIDITY,
+    "spread_too_wide": RejectReason.SPREAD_TOO_WIDE,
+    "weak_trend": RejectReason.NO_DIRECTION,
+    "no_clear_direction": RejectReason.NO_DIRECTION,
+    "volatility_too_low": RejectReason.VOLATILITY_OUT_OF_RANGE,
+    "volatility_too_high": RejectReason.VOLATILITY_OUT_OF_RANGE,
+    "low_volume_score": RejectReason.INSUFFICIENT_LIQUIDITY,
+    "low_absolute_volume": RejectReason.INSUFFICIENT_LIQUIDITY,
+    "blacklisted": RejectReason.BLACKLISTED,
+    "in_cooldown": RejectReason.IN_COOLDOWN,
+}
+
+
+def _reject_from_filter(result: FilterResult) -> RejectReason:
+    return _FILTER_REJECT.get(result.reason, RejectReason.INSUFFICIENT_DATA)
+
+
+def _reject_from_strategy(reason: str) -> RejectReason:
+    text = reason.lower()
+    if "conflict" in text:
+        return RejectReason.CONFLICTING_TIMEFRAMES
+    if "partial" in text:
+        return RejectReason.LOW_CONFIDENCE
+    if "no directional" in text or "missing timeframes" in text:
+        return RejectReason.NO_DIRECTION
+    return RejectReason.LOW_SCORE
 
 
 class CandidateBuilder:
@@ -78,10 +108,9 @@ class CandidateBuilder:
             result = filter_instance.evaluate(features)
             filter_results.append(result)
             if not result.passed:
-                # Rejected by filter
                 report = DecisionReport.rejected_report(
                     symbol=symbol,
-                    reject_reason="insufficient_data",  # Generic, will be overridden
+                    reject_reason=_reject_from_filter(result),
                     filter_result=result,
                     features=features,
                 )
@@ -109,7 +138,7 @@ class CandidateBuilder:
             # Strategy rejected
             report = DecisionReport.rejected_report(
                 symbol=symbol,
-                reject_reason="low_score",  # Will be refined
+                reject_reason=_reject_from_strategy(signal_result.reason),
                 features=features,
                 explanation=signal_result.reason,
             )

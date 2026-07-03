@@ -16,6 +16,7 @@ dependency surface to the stdlib.
 from __future__ import annotations
 
 import sqlite3
+import asyncio
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
@@ -112,7 +113,9 @@ class CandleRepository:
     def __init__(self, db: Database) -> None:
         self._db = db
 
+    # Sync methods (for tests and other sync code)
     def upsert_many(self, symbol: str, timeframe: str, candles: list[Candle]) -> int:
+        """Synchronous upsert."""
         if not candles:
             return 0
         rows = [
@@ -131,6 +134,7 @@ class CandleRepository:
         return len(rows)
 
     def latest_ts(self, symbol: str, timeframe: str) -> int | None:
+        """Synchronous latest_ts."""
         row = self._db.conn.execute(
             "SELECT MAX(ts_ms) AS m FROM candles WHERE symbol=? AND timeframe=?",
             (symbol, timeframe),
@@ -138,13 +142,14 @@ class CandleRepository:
         return int(row["m"]) if row and row["m"] is not None else None
 
     def fetch(self, symbol: str, timeframe: str, limit: int = 200) -> list[Candle]:
-        limit = max(1, min(int(limit), policy.MAX_CANDLES_LOOKBACK))
+        """Synchronous fetch."""
+        limit_val = max(1, min(int(limit), policy.MAX_CANDLES_LOOKBACK))
         rows = self._db.conn.execute(
             """SELECT ts_ms, open, high, low, close, volume
                  FROM candles
                 WHERE symbol=? AND timeframe=?
                 ORDER BY ts_ms DESC LIMIT ?""",
-            (symbol, timeframe, limit),
+            (symbol, timeframe, limit_val),
         ).fetchall()
         out = [
             Candle(
@@ -155,6 +160,57 @@ class CandleRepository:
         ]
         out.reverse()  # ascending for indicators
         return out
+
+    # Async methods for use in async context (use run_in_executor)
+    async def upsert_many_async(self, symbol: str, timeframe: str, candles: list[Candle]) -> int:
+        """Async wrapper using run_in_executor for sync SQLite operations."""
+        return await asyncio.get_event_loop().run_in_executor(
+            None, lambda: self.upsert_many(symbol, timeframe, candles)
+        )
+
+    async def latest_ts_async(self, symbol: str, timeframe: str) -> int | None:
+        """Async wrapper using run_in_executor for sync SQLite operations."""
+        return await asyncio.get_event_loop().run_in_executor(
+            None, lambda: self.latest_ts(symbol, timeframe)
+        )
+
+    async def fetch_async(self, symbol: str, timeframe: str, limit: int = 200) -> list[Candle]:
+        """Async wrapper using run_in_executor for sync SQLite operations."""
+        return await asyncio.get_event_loop().run_in_executor(
+            None, lambda: self.fetch(symbol, timeframe, limit)
+        )
+
+    async def fetch_since(self, symbol: str, timeframe: str, since_ts: int) -> list[Candle]:
+        """Fetch candles with timestamp greater than since_ts (for incremental updates)."""
+        def _sync_fetch_since() -> list[Candle]:
+            rows = self._db.conn.execute(
+                """SELECT ts_ms, open, high, low, close, volume
+                     FROM candles
+                    WHERE symbol=? AND timeframe=? AND ts_ms > ?
+                    ORDER BY ts_ms ASC""",
+                (symbol, timeframe, since_ts),
+            ).fetchall()
+            out = [
+                Candle(
+                    timestamp=int(r["ts_ms"]), open=float(r["open"]), high=float(r["high"]),
+                    low=float(r["low"]), close=float(r["close"]), volume=float(r["volume"]),
+                )
+                for r in rows
+            ]
+            return out
+        
+        return await asyncio.get_event_loop().run_in_executor(None, _sync_fetch_since)
+
+    async def count(self, symbol: str, timeframe: str) -> int:
+        """Count candles for a symbol/timeframe pair."""
+        def _sync_count() -> int:
+            row = self._db.conn.execute(
+                "SELECT COUNT(*) AS c FROM candles WHERE symbol=? AND timeframe=?",
+                (symbol, timeframe),
+            ).fetchone()
+            return int(row["c"]) if row else 0
+        
+        return await asyncio.get_event_loop().run_in_executor(None, _sync_count)
 
 
 # --------------------------------------------------------------------------- #

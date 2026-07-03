@@ -15,7 +15,7 @@ dependency surface small and behaviour deterministic in tests.
 from __future__ import annotations
 
 import asyncio
-from typing import Any, cast
+from typing import Any, Self, cast
 
 import ccxt.async_support as ccxt_async
 
@@ -58,6 +58,15 @@ class _BaseClient:
         opts: dict[str, Any] = {
             "enableRateLimit": True,
             "rateLimit": config.settings.exchange.rate_limit_ms,
+            # Bybit's unified API serves multiple market "categories" (spot,
+            # linear perpetuals, inverse, option) from the same endpoints.
+            # Without this, ccxt's default category for calls like
+            # fetch_tickers(None) is "linear" (derivatives) rather than
+            # "spot" — so an unscoped fetch_tickers() silently returns
+            # hundreds of perpetual-futures tickers and zero spot pairs,
+            # even though this bot only ever builds "<BASE>/<QUOTE>" spot
+            # symbols. This bit us as auto-discover finding 0 symbols.
+            "options": {"defaultType": "spot"},
         }
         # Inject credentials only when provided; ccxt treats empty string as
         # a credential, which can confuse some exchanges' public endpoints.
@@ -75,7 +84,12 @@ class _BaseClient:
         self._ex.set_sandbox_mode(sandbox)
         self._closed = False
 
-    async def __aenter__(self) -> _BaseClient:
+    async def __aenter__(self) -> Self:
+        # `Self` (rather than `_BaseClient`) is what makes static type
+        # checkers (Pylance/mypy) preserve the concrete subclass across
+        # `async with MarketDataClient(config) as client:` — otherwise
+        # `client` gets widened to the base class and loses access to
+        # subclass-only methods like `fetch_tickers`/`available_symbols`.
         return self
 
     async def __aexit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
@@ -142,6 +156,18 @@ class MarketDataClient(_BaseClient):
 
     async def fetch_tickers(self, symbols: list[str] | None = None) -> dict[str, Any]:
         return cast(dict[str, Any], await self._with_retry("fetch_tickers", self._ex.fetch_tickers, symbols))
+
+    async def available_symbols(self) -> set[str]:
+        """All symbols the exchange currently lists (mainnet vs testnet differ).
+
+        Used to filter a configured watchlist before it hits ``fetch_tickers``/
+        ``fetch_ohlcv`` — testnet in particular carries a much smaller market
+        set, and asking for a delisted/unlisted symbol raises ``ccxt.BadSymbol``,
+        which is a hard, non-retryable error that would otherwise abort the
+        whole scan cycle for every symbol, not just the missing one.
+        """
+        markets = await self.load_markets()
+        return set(markets.keys())
 
 
 class ExecutionClient(_BaseClient):

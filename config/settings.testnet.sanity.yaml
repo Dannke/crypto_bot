@@ -1,0 +1,95 @@
+# =============================================================================
+# crypto_bot — SANITY-CHECK profile. DIAGNOSTIC USE ONLY, not for real testing.
+#
+# Purpose: confirm the selection mechanism (filters -> score -> strategy ->
+# selector) is CAPABLE of producing a selected candidate at all, by relaxing
+# every quality threshold to near-nothing. If this profile still selects
+# zero candidates, the problem is upstream of thresholds (e.g. strategy
+# signal logic, feature computation, or data itself) — not "the bar is too
+# high". If it DOES select candidates, that confirms settings.testnet.yaml's
+# zero selections are a legitimate "no good setups right now" result, not a
+# broken pipeline.
+#
+# Do NOT use this profile to draw conclusions about strategy quality — with
+# thresholds this loose it will happily select weak/noisy setups. Delete or
+# ignore its output once the sanity check is done.
+#
+#   python -m crypto_bot.cli --config config/settings.testnet.sanity.yaml
+# =============================================================================
+
+runtime:
+  mode: signal_only
+  loop_interval_seconds: 60
+  timezone: UTC
+
+exchange:
+  name: bybit
+  sandbox: true
+  rate_limit_ms: 1200
+
+timeframes:
+  primary: ["15m", "1h", "4h"]
+  candles_per_tf: 250
+
+strategy:
+  trend:
+    ema_fast: 21
+    ema_mid: 50
+    ema_slow: 200
+    adx_min: 1.0          # near-disabled: any measurable trend passes
+  momentum:
+    rsi_period: 14
+    rsi_long_min: 50.0
+    rsi_long_max: 70.0
+    rsi_short_min: 30.0
+    rsi_short_max: 50.0
+  volatility:
+    atr_period: 14
+    atr_min_pct: 0.01     # near-disabled: almost any movement passes
+    atr_max_pct: 100.0    # near-disabled: no upper cap in practice
+    bb_period: 20
+    bb_std: 2.0
+  volume:
+    ma_period: 20
+    spike_ratio: 1.0      # baseline volume already counts as a "spike"
+
+scoring:
+  weights:
+    trend: 0.25
+    momentum: 0.15
+    volume: 0.15
+    volatility: 0.10
+    liquidity: 0.10
+    spread: 0.05
+    risk: 0.20
+  min_score: 0.0           # accept anything that clears the filters
+  min_confidence: 0.0      # accept anything that clears the filters
+  max_candidates_per_cycle: 10
+
+filters:
+  enable_liquidity_filter: false   # testnet volume data is unreliable, see settings.testnet.yaml
+  enable_spread_filter: false
+  enable_volume_filter: false      # same reason — testnet spot volume is near-zero/flat
+  min_quote_volume_usd: 1000.0
+  max_spread_pct: 5.0
+  min_volume_score: 0.0
+  min_absolute_volume: 0.0
+  blacklist: []
+  cooldown_after_trade_minutes: 0
+
+risk:
+  equity_currency: USDT
+  risk_per_trade_pct: 1.0
+  take_profit_risk_multiple: 2.0
+  max_stop_distance_pct: 3.0
+  max_open_positions: 5
+  max_daily_drawdown_pct: 3.0
+  emergency_drawdown_pct: 6.0
+
+storage:
+  db_path: data/crypto_bot_testnet.db
+
+logging:
+  level: INFO
+  file: logs/crypto_bot_testnet.log
+  json: false

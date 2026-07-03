@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from ..core.enums import Signal
 from .base import MLPrediction
 
 
@@ -37,7 +38,7 @@ class Predictor:
         # Stub implementation - returns HOLD with no confidence
         return MLPrediction(
             symbol=features.get("symbol", "UNKNOWN"),
-            signal="HOLD",
+            signal=Signal.HOLD,
             side=None,
             confidence=0.0,
             model_name="stub",

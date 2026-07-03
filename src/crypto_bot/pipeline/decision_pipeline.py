@@ -6,6 +6,8 @@ decision intelligence layer.
 """
 from __future__ import annotations
 
+from collections import Counter
+from dataclasses import replace
 from typing import Any
 
 from ..core.types import FeatureSet
@@ -65,14 +67,25 @@ class DecisionPipeline:
         if selection_config:
             self._selector = CandidateSelector(selection_config)
 
-        # Build candidates
+        # Build candidates. `accepted_reports` are candidates that passed every
+        # filter AND got a directional signal from the strategy — they still
+        # need to clear the selector's score/confidence threshold below.
+        # `rejected_reports` are everything that was dropped earlier (a failed
+        # filter, or a HOLD/conflicting-timeframes verdict from the strategy).
         accepted_reports, rejected_reports = self._builder.build_batch(
             features_by_symbol,
             strategy,
         )
 
-        # Select best candidates
+        # Select best candidates from those that cleared the builder stage.
         selected = self._selector.select(accepted_reports)
+
+        # Anything that cleared filters + got a signal, but didn't make the
+        # final cut (score/confidence threshold, or max_candidates_per_cycle),
+        # is also a rejection — fold it into the same reporting bucket so the
+        # full population is accounted for: processed == len(selected) + len(all_rejected).
+        below_threshold = [r for r in accepted_reports if r not in selected]
+        all_rejected = rejected_reports + below_threshold
 
         # Apply fusion (currently classical only)
         fused_decisions = []
@@ -81,15 +94,27 @@ class DecisionPipeline:
             fused_decisions.append(fused)
 
         # Generate explanations
+        explained_selected = []
         for report in selected:
-            report.explanation = self._explanation_generator.generate(report)
+            explanation = self._explanation_generator.generate(report)
+            explained_selected.append(replace(report, explanation=explanation))
+        selected = explained_selected
 
-        # Compile results
+        # Compile results. `get_selection_stats` only knows about the builder
+        # stage's "accepted" population, so recompute the top-level counters
+        # here from the full picture instead of trusting it blindly.
         stats = self._selector.get_selection_stats(accepted_reports, selected)
+        stats["rejected_count"] = len(all_rejected)
+        stats["reject_reasons"] = dict(
+            Counter(
+                r.reject_reason.value if r.reject_reason else "unknown"
+                for r in all_rejected
+            )
+        )
 
         return {
             "selected": selected,
-            "rejected": rejected_reports,
+            "rejected": all_rejected,
             "fused_decisions": fused_decisions,
             "stats": stats,
             "total_processed": len(features_by_symbol),
@@ -120,9 +145,8 @@ class DecisionPipeline:
         if accepted_report:
             # Apply fusion
             fused = self._apply_fusion(accepted_report)
-            # Generate explanation
-            accepted_report.explanation = self._explanation_generator.generate(accepted_report)
-            return accepted_report
+            explanation = self._explanation_generator.generate(accepted_report)
+            return replace(accepted_report, explanation=explanation)
 
         return None
 

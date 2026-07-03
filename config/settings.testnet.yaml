@@ -1,0 +1,103 @@
+# =============================================================================
+# crypto_bot — TESTNET configuration profile.
+#
+# Bybit testnet has little to no real trading volume/liquidity — its ticker
+# `quoteVolume` is frequently zero or negligible. Using the production
+# thresholds from settings.yaml (min_quote_volume_usd: 5,000,000) against
+# testnet data means LiquidityFilter rejects every single symbol before any
+# other filter runs, so the bot never produces a signal — not because the
+# strategy logic is broken, but because the filter is being asked a question
+# testnet cannot answer meaningfully.
+#
+# This file exists so that never has to be worked around by hand-editing
+# settings.yaml (the production config) back and forth. Run it explicitly:
+#
+#   python -m crypto_bot.cli --config config/settings.testnet.yaml
+#
+# Everything NOT overridden here still goes through the same pydantic schema
+# validation as settings.yaml (config/schemas.py) — this is a complete,
+# independent config file, not a patch/overlay.
+# =============================================================================
+
+runtime:
+  mode: signal_only        # keep signal_only (or paper) for testnet — never live
+  loop_interval_seconds: 60
+  timezone: UTC
+
+exchange:
+  name: bybit
+  sandbox: true             # use testnet endpoints
+  rate_limit_ms: 1200
+
+timeframes:
+  primary: ["15m", "1h", "4h"]
+  candles_per_tf: 250
+
+strategy:
+  trend:
+    ema_fast: 21
+    ema_mid: 50
+    ema_slow: 200
+    adx_min: 20.0
+  momentum:
+    rsi_period: 14
+    rsi_long_min: 50.0
+    rsi_long_max: 70.0
+    rsi_short_min: 30.0
+    rsi_short_max: 50.0
+  volatility:
+    atr_period: 14
+    atr_min_pct: 0.5
+    atr_max_pct: 8.0
+    bb_period: 20
+    bb_std: 2.0
+  volume:
+    ma_period: 20
+    spike_ratio: 1.5
+
+scoring:
+  weights:
+    trend: 0.25
+    momentum: 0.15
+    volume: 0.15
+    volatility: 0.10
+    liquidity: 0.10
+    spread: 0.05
+    risk: 0.20
+  # Left at production values on purpose: score/confidence thresholds test
+  # the STRATEGY, not the exchange's data quality — only the liquidity/spread
+  # filters below are testnet-specific, since those measure something the
+  # testnet ticker genuinely cannot represent (real market depth).
+  min_score: 65.0
+  min_confidence: 0.6
+  max_candidates_per_cycle: 3
+
+filters:
+  # Testnet quoteVolume/spread data is unreliable — often zero even for
+  # active pairs — so these two filters are disabled outright rather than
+  # tuned to an arbitrary threshold that might reject everything (or nothing,
+  # defeating the point). They test real exchange microstructure that
+  # testnet fundamentally doesn't have. Re-enable both for any mainnet run.
+  enable_liquidity_filter: false
+  enable_spread_filter: false
+  min_quote_volume_usd: 1000.0   # unused while disabled; kept as a mainnet-ready reference value
+  max_spread_pct: 5.0            # unused while disabled; kept as a mainnet-ready reference value
+  blacklist: []
+  cooldown_after_trade_minutes: 240
+
+risk:
+  equity_currency: USDT
+  risk_per_trade_pct: 1.0
+  take_profit_risk_multiple: 2.0
+  max_stop_distance_pct: 3.0
+  max_open_positions: 5
+  max_daily_drawdown_pct: 3.0
+  emergency_drawdown_pct: 6.0
+
+storage:
+  db_path: data/crypto_bot_testnet.db   # separate DB so testnet runs never mix with production journal
+
+logging:
+  level: INFO
+  file: logs/crypto_bot_testnet.log
+  json: false

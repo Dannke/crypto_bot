@@ -31,6 +31,7 @@ class StrategyContext:
     atr_min_pct: float
     atr_max_pct: float
     take_profit_risk_multiple: float
+    max_stop_distance_pct: float = 3.0
     raw: dict[str, Any] | None = None
 
 

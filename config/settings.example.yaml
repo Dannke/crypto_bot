@@ -43,12 +43,13 @@ strategy:
 
 scoring:
   weights:
-    trend: 0.30
-    momentum: 0.20
+    trend: 0.25
+    momentum: 0.15
     volume: 0.15
-    setup: 0.15
-    reward_risk: 0.15
-    liquidity: 0.05
+    volatility: 0.10
+    liquidity: 0.10
+    spread: 0.05
+    risk: 0.20
   min_score: 65.0          # only candidates >= this are considered (0..100)
   min_confidence: 0.6      # 0..1, cross-timeframe agreement threshold
   max_candidates_per_cycle: 3

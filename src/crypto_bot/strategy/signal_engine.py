@@ -16,6 +16,7 @@ from typing import Any
 from ..core.enums import Side, Signal
 from ..core.types import FeatureSet, ScoredCandidate, SignalResult
 from .base import Strategy, StrategyContext
+from .scorer import Scorer
 
 
 def _direction_from_features(f: FeatureSet, ctx: StrategyContext) -> Side | None:
@@ -56,6 +57,7 @@ class SignalEngine(Strategy):
     def __init__(self, ctx: StrategyContext, timeframes: list[str]) -> None:
         self._ctx = ctx
         self._order = _split_timeframes(timeframes)
+        self._scorer = Scorer(ctx, ctx.max_stop_distance_pct)
 
     # Evaluate returns SignalResult directly (the base type is Any for flexibility).
     def evaluate(self, symbol: str, features_by_tf: dict[str, FeatureSet]) -> SignalResult:
@@ -133,5 +135,4 @@ class SignalEngine(Strategy):
         )
 
     def score(self, features: FeatureSet, signal_result: Any) -> ScoredCandidate | None:
-        # Delegate to the dedicated Scorer; kept here to satisfy the Strategy ABC.
-        raise NotImplementedError("use Scorer.score_candidate for scoring")
+        return self._scorer.score_candidate(features, signal_result)

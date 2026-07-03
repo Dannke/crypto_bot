@@ -29,15 +29,16 @@ class Scorer:
 
     def _raw_score(self, f: FeatureSet) -> float:
         w = self._ctx.scoring_weights
-        # Normalise weights so they always sum to 1 regardless of user tuning.
-        total_w = w["trend"] + w["momentum"] + w["volume"] + w["setup"] + w["reward_risk"] + w["liquidity"]
+        spread_w = w.get("spread", w.get("setup", 0.05))
+        risk_w = w.get("risk", w.get("reward_risk", 0.15))
+        total_w = w["trend"] + w["momentum"] + w["volume"] + spread_w + risk_w + w["liquidity"]
         s = (
             w["trend"] * f.trend_score
             + w["momentum"] * f.momentum_score
             + w["volume"] * f.volume_score
-            + w["setup"] * 0.5  # placeholder until entry-setup sub-score is computed
-            + w["reward_risk"] * 0.5
-            + w["liquidity"] * f.volatility_score  # reuse vol band as a liq proxy
+            + spread_w * min(1.0, 1.0 - f.spread_pct)
+            + risk_w * (1.0 if f.market_regime != "choppy" else 0.3)
+            + w["liquidity"] * f.liquidity_score
         )
         return s / total_w if total_w > 0 else 0.0
 

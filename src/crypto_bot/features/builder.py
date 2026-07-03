@@ -20,6 +20,8 @@ import pandas as pd
 from ..core.exceptions import InsufficientDataError
 from ..core.types import Candle, FeatureSet
 from ..indicators import adx, atr_pct, bollinger_position, ema_cross_state, rsi, volume_spike_ratio
+from ..indicators.bollinger import bollinger_bands
+from .context import SymbolMarketContext, liquidity_score
 
 
 # --------------------------------------------------------------------------- #
@@ -152,6 +154,22 @@ def _norm_volume(m: RawMetrics, spike_ratio: float) -> float:
     return min(1.0, 0.5 + (m.vol_spike - spike_ratio) / spike_ratio)
 
 
+def _infer_market_regime(m: RawMetrics, adx_min: float) -> str:
+    if m.adx < adx_min * 0.75 or m.ema_state == "mixed":
+        return "choppy"
+    if m.ema_state == "bull":
+        return "bull"
+    if m.ema_state == "bear":
+        return "bear"
+    return "neutral"
+
+
+def _bb_levels(candles: list[Candle], period: int, std: float) -> tuple[float, float, float]:
+    df = _df(candles)
+    bb = bollinger_bands(df["close"], period, std)
+    return bb.last()
+
+
 # --------------------------------------------------------------------------- #
 # Builder
 # --------------------------------------------------------------------------- #
@@ -166,6 +184,7 @@ class FeatureBuilderParams:
     atr_lo_pct: float
     atr_hi_pct: float
     vol_spike_ratio: float
+    min_quote_volume: float = 5_000_000.0
 
 
 class FeatureBuilder:
@@ -174,13 +193,25 @@ class FeatureBuilder:
     def __init__(self, params: FeatureBuilderParams) -> None:
         self._p = params
 
-    def _build_one(self, symbol: str, timeframe: str, candles: list[Candle]) -> FeatureSet:
+    def _build_one(
+        self,
+        symbol: str,
+        timeframe: str,
+        candles: list[Candle],
+        *,
+        market: SymbolMarketContext | None = None,
+        correlation_btc: float = 0.0,
+        correlation_eth: float = 0.0,
+    ) -> FeatureSet:
         m = compute_raw_metrics(
             candles, timeframe,
             self._p.ema, self._p.rsi_period, self._p.atr_period,
             self._p.bb, self._p.volma_period,
         )
-        last_close = candles[-1].close if candles else float("nan")
+        last = candles[-1]
+        bb_upper, bb_mid, bb_lower = _bb_levels(candles, self._p.bb[0], self._p.bb[1])
+        ctx = market or SymbolMarketContext()
+        liq = liquidity_score(ctx.quote_volume_24h, self._p.min_quote_volume)
         return FeatureSet(
             symbol=symbol,
             timeframe=timeframe,
@@ -194,28 +225,71 @@ class FeatureBuilder:
             ema_fast=m.ema_fast,
             ema_mid=m.ema_mid,
             ema_slow=m.ema_slow,
+            bb_upper=bb_upper,
+            bb_mid=bb_mid,
+            bb_lower=bb_lower,
+            bb_position=m.bb_pos,
+            liquidity_score=liq,
+            spread_pct=ctx.spread_pct,
+            correlation_btc=correlation_btc,
+            correlation_eth=correlation_eth,
+            market_regime=_infer_market_regime(m, self._p.adx_min),
+            open=last.open,
+            high=last.high,
+            low=last.low,
+            close=last.close,
+            volume=last.volume,
             extras={
-                "last_close": last_close,
+                "last_close": last.close,
                 "ema_state": float(m.ema_state == "bull") - float(m.ema_state == "bear"),
                 "bb_pos": m.bb_pos,
                 "vol_spike": m.vol_spike,
+                "quote_volume_24h": ctx.quote_volume_24h,
             },
         )
 
-    def build(self, symbol: str, by_timeframe: dict[str, list[Candle]]) -> FeatureSet:
-        # The "primary"/trigger timeframe (first entry, fastest) drives the
-        # headline sub-scores; build_all exposes every timeframe to strategy.
+    def build(
+        self,
+        symbol: str,
+        by_timeframe: dict[str, list[Candle]],
+        *,
+        market: SymbolMarketContext | None = None,
+        correlation_btc: float = 0.0,
+        correlation_eth: float = 0.0,
+    ) -> FeatureSet:
         if not by_timeframe:
             raise InsufficientDataError("no timeframes provided")
         trigger_tf = next(iter(by_timeframe))
-        return self._build_one(symbol, trigger_tf, by_timeframe[trigger_tf])
+        return self._build_one(
+            symbol,
+            trigger_tf,
+            by_timeframe[trigger_tf],
+            market=market,
+            correlation_btc=correlation_btc,
+            correlation_eth=correlation_eth,
+        )
 
-    def build_all(self, symbol: str, by_timeframe: dict[str, list[Candle]]) -> dict[str, FeatureSet]:
+    def build_all(
+        self,
+        symbol: str,
+        by_timeframe: dict[str, list[Candle]],
+        *,
+        market: SymbolMarketContext | None = None,
+        correlation_btc: float = 0.0,
+        correlation_eth: float = 0.0,
+    ) -> dict[str, FeatureSet]:
         """Build one FeatureSet per timeframe, preserving input order."""
         if not by_timeframe:
             raise InsufficientDataError("no timeframes provided")
         return {
-            timeframe: self._build_one(symbol, timeframe, candles)
+            timeframe: self._build_one(
+                symbol,
+                timeframe,
+                candles,
+                market=market,
+                correlation_btc=correlation_btc,
+                correlation_eth=correlation_eth,
+            )
             for timeframe, candles in by_timeframe.items()
         }
 
@@ -238,5 +312,6 @@ def builder_from_settings(settings: Any) -> FeatureBuilder:
         atr_lo_pct=strat.volatility.atr_min_pct,
         atr_hi_pct=strat.volatility.atr_max_pct,
         vol_spike_ratio=strat.volume.spike_ratio,
+        min_quote_volume=s.filters.min_quote_volume_usd,
     )
     return FeatureBuilder(params)

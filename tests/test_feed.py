@@ -19,6 +19,15 @@ class FakeMarketDataClient:
             "BTC/USDT:USDT": {"quoteVolume": 9000},
         }
 
+    async def available_symbols(self):
+        return {
+            "BTC/USDT",
+            "ETH/USDT",
+            "USDC/USDT",
+            "BTCUP/USDT",
+            "SOL/USDT",
+        }
+
 
 def test_to_dataframe_accepts_slots_candles():
     candles = [

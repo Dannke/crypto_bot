@@ -6,6 +6,7 @@ to determine which candidates to trade.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
 from ..decision.decision_report import DecisionReport
 from ..scoring.ranking import RankingEngine

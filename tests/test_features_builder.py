@@ -102,6 +102,25 @@ def test_insufficient_bars_raise():
         fb.build("ADA/USDT", {"15m": candles})
 
 
+def test_builder_populates_microstructure_fields():
+    closes = [10 + i * 0.4 for i in range(250)]
+    candles = _candles(closes)
+    fb = FeatureBuilder(PARAMS)
+    from crypto_bot.features.context import SymbolMarketContext
+
+    fs = fb.build(
+        "BTC/USDT",
+        {"15m": candles},
+        market=SymbolMarketContext(quote_volume_24h=15_000_000, spread_pct=0.08),
+    )
+    assert fs.close == closes[-1]
+    assert fs.volume == candles[-1].volume
+    assert fs.liquidity_score > 0
+    assert fs.spread_pct == 0.08
+    assert fs.market_regime in ("bull", "bear", "neutral", "choppy")
+    assert fs.bb_upper >= fs.bb_lower
+
+
 def test_insufficient_slow_ema_warmup_raises():
     fb = FeatureBuilder(PARAMS)
     candles = _candles([10 + i * 0.1 for i in range(199)])

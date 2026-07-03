@@ -76,3 +76,15 @@ class ExecutionError(CryptoBotError):
 
 class OrderError(ExecutionError):
     """An order-specific failure (rejected, not filled, unknown status)."""
+
+
+# --------------------------------------------------------------------------- #
+# Orchestrator
+# --------------------------------------------------------------------------- #
+class OrchestratorError(CryptoBotError):
+    """The main scan loop crashed and could not continue.
+
+    Raised by ``run_orchestrator`` when an unexpected exception escapes the
+    per-cycle error handling, signalling that the whole process must stop
+    rather than just skipping a cycle.
+    """

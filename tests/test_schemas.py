@@ -56,7 +56,15 @@ def test_scoring_weights_must_sum_positive():
     # All-zero weights sum to 0, which the model_validator rejects. The check
     # fires at construction time (ScoringWeights), so we expect it there.
     with pytest.raises(ValidationError):
-        ScoringWeights(trend=0, momentum=0, volume=0, setup=0, reward_risk=0, liquidity=0)
+        ScoringWeights(
+            trend=0,
+            momentum=0,
+            volume=0,
+            volatility=0,
+            liquidity=0,
+            spread=0,
+            risk=0,
+        )
 
 
 def test_risk_drawdown_ladder_must_ascend():
