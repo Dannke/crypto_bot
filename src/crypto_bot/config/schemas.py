@@ -24,6 +24,7 @@ class RuntimeConfig(StrictConfigModel):
     mode: Mode = Mode.SIGNAL_ONLY
     loop_interval_seconds: int = Field(default=60, ge=5)
     timezone: str = "UTC"
+    strategy: str = "confluence"  # "confluence" (multi-TF) or "per_timeframe" (independent per TF)
 
 
 class ExchangeConfig(StrictConfigModel):
@@ -33,11 +34,11 @@ class ExchangeConfig(StrictConfigModel):
 
 
 class TimeframesConfig(StrictConfigModel):
-    primary: list[str] = Field(default_factory=lambda: ["15m", "1h", "4h"])
-    # Must comfortably exceed the longest indicator period. The default trend
-    # EMA slow is 200; validators require period + 10 bars, so 250 leaves a
-    # sane margin without being wasteful. (Floor is 50, enforced below.)
-    candles_per_tf: int = Field(default=250, ge=50)
+    primary: list[str] = Field(default_factory=lambda: ["1m", "15m", "1h", "4h"])
+    # Must comfortably exceed the longest indicator period (default EMA slow=200)
+    # plus ~2x warmup for EMA stabilisation. 400 gives EMA(200) a 200-bar
+    # runway. Validators enforce >= max_period + 10. (Floor is 50.)
+    candles_per_tf: int = Field(default=400, ge=50)
 
     @model_validator(mode="after")
     def _non_empty(self) -> TimeframesConfig:

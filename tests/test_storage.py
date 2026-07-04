@@ -62,12 +62,13 @@ def test_candle_upsert_and_fetch(repos):
 def test_candle_upsert_is_idempotent(repos):
     c = Candle(timestamp=1000, open=1, high=2, low=0.5, close=1.5, volume=10)
     repos.candles.upsert_many("BTC/USDT", "15m", [c])
+    # Second insert with same key — ON CONFLICT DO NOTHING keeps original values
     c_updated = Candle(timestamp=1000, open=1, high=2, low=0.5, close=9.9, volume=99)
     repos.candles.upsert_many("BTC/USDT", "15m", [c_updated])
     fetched = repos.candles.fetch("BTC/USDT", "15m", limit=10)
     assert len(fetched) == 1
-    assert fetched[0].close == 9.9
-    assert fetched[0].volume == 99
+    assert fetched[0].close == 1.5   # original value preserved
+    assert fetched[0].volume == 10   # original value preserved
 
 
 # --------------------------------------------------------------------------- #

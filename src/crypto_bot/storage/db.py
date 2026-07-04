@@ -126,9 +126,7 @@ class CandleRepository:
             conn.executemany(
                 """INSERT INTO candles (symbol, timeframe, ts_ms, open, high, low, close, volume)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                   ON CONFLICT(symbol, timeframe, ts_ms) DO UPDATE SET
-                     open=excluded.open, high=excluded.high, low=excluded.low,
-                     close=excluded.close, volume=excluded.volume""",
+                   ON CONFLICT(symbol, timeframe, ts_ms) DO NOTHING""",
                 rows,
             )
         return len(rows)

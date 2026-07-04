@@ -238,6 +238,9 @@ class Feed:
         self._db = db
         self._candle_repo = CandleRepository(db) if db else None
         self._exchange_available = True
+        # In-memory cache: (symbol, tf) -> list[Candle] — avoids re-reading
+        # the full candle window from DB on every cycle.
+        self._cache: dict[tuple[str, str], list[Candle]] = {}
 
     @property
     def exchange_available(self) -> bool:
@@ -250,70 +253,73 @@ class Feed:
     async def fetch_symbol(self, symbol: str) -> SymbolFeed:
         """Fetch all timeframes for one symbol, concurrently with DB caching."""
         async def _one(tf: str) -> tuple[str, list[Candle]]:
-            # Try to get candles from DB first
-            db_candles: list[Candle] = []
+            cache_key = (symbol, tf)
+            cached = self._cache.get(cache_key)
             latest_ts: int | None = None
             
-            if self._candle_repo:
+            if cached is not None:
+                # Use in-memory cache from the previous cycle
+                latest_ts = cached[-1].timestamp if cached else None
+            elif self._candle_repo:
+                # First cycle — load from DB
                 latest_ts = await self._candle_repo.latest_ts_async(symbol, tf)
                 if latest_ts is not None:
-                    db_candles = await self._candle_repo.fetch_async(symbol, tf, limit=self._limit)
-                    _log.info(
-                        "feed: loaded %d candles from DB for %s %s (latest_ts=%d)",
-                        len(db_candles), symbol, tf, latest_ts,
-                    )
-                else:
-                    _log.info(
-                        "feed: no DB data for %s %s, will fetch full history from API",
-                        symbol, tf,
-                    )
-            else:
-                _log.warning("feed: candle repository not available, DB caching disabled")
+                    cached = await self._candle_repo.fetch_async(symbol, tf, limit=self._limit)
+                    _log.info("feed: db %s %s = %d candles", symbol, tf, len(cached))
             
             # Try fetching new candles from API (skip if exchange is known down)
             fetched_new: list[Candle] = []
             if self._exchange_available:
                 try:
                     if latest_ts is not None:
-                        raw = await self._client.fetch_ohlcv(symbol, tf, limit=self._limit, since=latest_ts)
-                        fetched_new = _sort_dedup([_row_to_candle(r) for r in raw])
-                        if fetched_new:
-                            fetched_new = [c for c in fetched_new if c.timestamp > latest_ts]
+                        # Chunked catch-up: fetch in batches until we've caught up to present.
+                        # If the exchange returns a full batch (== self._limit), there may be
+                        # more candles — keep fetching until we get a partial batch.
+                        fetch_since: int = latest_ts
+                        chunks = 0
+                        while True:
+                            raw = await self._client.fetch_ohlcv(
+                                symbol, tf, limit=self._limit, since=fetch_since,
+                            )
+                            batch = _sort_dedup([_row_to_candle(r) for r in raw])
+                            batch = [c for c in batch if c.timestamp > latest_ts]
+                            if not batch:
+                                break
+                            fetched_new.extend(batch)
+                            chunks += 1
+                            # Partial batch means we've reached the exchange's latest data
+                            if len(batch) < self._limit:
+                                break
+                            fetch_since = batch[-1].timestamp + 1
                         _log.info(
-                            "feed: fetched %d new candles from API for %s %s (since=%d)",
-                            len(fetched_new), symbol, tf, latest_ts,
+                            "feed: api+ %s %s: +%d from ts=%d (%d chunks)",
+                            symbol, tf, len(fetched_new), latest_ts, chunks,
                         )
                     else:
                         raw = await self._client.fetch_ohlcv(symbol, tf, limit=self._limit)
                         fetched_new = _sort_dedup([_row_to_candle(r) for r in raw])
-                        _log.info(
-                            "feed: fetched %d candles from API for %s %s (full fetch)",
-                            len(fetched_new), symbol, tf,
-                        )
                 except Exception as exc:
-                    _log.warning(
-                        "feed: API fetch failed for %s %s, using DB cache only (%d candles): %s",
-                        symbol, tf, len(db_candles), exc,
-                    )
+                    _log.warning("feed: api fail %s %s: %s", symbol, tf, exc)
                     self._exchange_available = False
-            else:
-                _log.info(
-                    "feed: exchange unavailable, using DB cache only for %s %s (%d candles)",
-                    symbol, tf, len(db_candles),
-                )
             
-            all_candles = db_candles + fetched_new
+            all_candles = (cached or []) + fetched_new
             all_candles = _sort_dedup(all_candles)
             
             if len(all_candles) > self._limit:
                 all_candles = all_candles[-self._limit:]
             
+            # Update in-memory cache
+            self._cache[cache_key] = all_candles
+            
             if fetched_new and self._candle_repo:
                 await self._candle_repo.upsert_many_async(symbol, tf, fetched_new)
-                _log.info(
-                    "feed: saved %d candles to DB for %s %s",
-                    len(fetched_new), symbol, tf,
-                )
+            
+            new_suffix = f" [+{len(fetched_new)}]" if fetched_new else ""
+            _log.info(
+                "feed: %s %s = %d candles%s  %d .. %d",
+                symbol, tf, len(all_candles), new_suffix,
+                all_candles[0].timestamp, all_candles[-1].timestamp,
+            )
             
             return tf, all_candles
 
@@ -327,9 +333,6 @@ class Feed:
         the bot's whole point is to scan a wide universe, so one outage must
         not blank the rest.
         """
-        import sys as _sys
-        _sys.stderr.write("[DBG] fetch_many called with %d symbols\n" % len(list(symbols)))
-        _sys.stderr.flush()
         symbols = list(symbols)  # materialise once
 
         async def _safe(sym: str) -> SymbolFeed | None:

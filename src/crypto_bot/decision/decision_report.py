@@ -134,6 +134,7 @@ class DecisionReport:
                 "last_close": features.extras.get("last_close", features.close),
                 "close": features.close,
                 "ema_fast": features.ema_fast,
+                "timeframe": features.timeframe,
             },
             strategy_name=strategy_name,
             explanation=explanation,
@@ -161,6 +162,7 @@ class DecisionReport:
                 "adx": features.adx if features else 0.0,
                 "rsi": features.rsi if features else 0.0,
                 "atr_pct": features.atr_pct if features else 0.0,
+                "timeframe": features.timeframe if features else "",
             } if features else {},
             explanation=explanation,
         )

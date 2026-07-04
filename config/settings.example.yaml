@@ -17,7 +17,7 @@ exchange:
 
 timeframes:
   primary: ["15m", "1h", "4h"]   # trigger / confirmation / trend
-  candles_per_tf: 250            # must cover ema_slow(200)+margin; >=210 enforced
+  candles_per_tf: 400            # must cover ema_slow(200)+margin (~2x for EMA warmup); >=210 enforced
 
 strategy:
   trend:

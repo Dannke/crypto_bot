@@ -83,6 +83,7 @@ def test_build_decision_pipeline_processes_batch():
 
     features_by_symbol = {
         "BTC/USDT": {
+            "1m": _feature("BTC/USDT", "1m"),
             "15m": _feature("BTC/USDT", "15m"),
             "1h": _feature("BTC/USDT", "1h"),
             "4h": _feature("BTC/USDT", "4h"),

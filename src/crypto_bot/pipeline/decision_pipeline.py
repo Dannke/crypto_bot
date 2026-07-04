@@ -51,6 +51,8 @@ class DecisionPipeline:
         features_by_symbol: dict[str, dict[str, FeatureSet]],
         strategy: Strategy,
         selection_config: SelectionConfig | None = None,
+        *,
+        per_timeframe: bool = False,
     ) -> dict[str, Any]:
         """Process feature sets and generate trading decisions.
 
@@ -58,11 +60,16 @@ class DecisionPipeline:
             features_by_symbol: Dictionary of symbol -> features by timeframe.
             strategy: Strategy instance for evaluation.
             selection_config: Optional selection configuration.
+            per_timeframe: If True, evaluate each timeframe as an independent
+                signal source (requires a strategy like ``SingleTfEngine``).
 
         Returns:
             Dictionary with processing results including selected candidates,
             rejected candidates, and statistics.
         """
+        if per_timeframe:
+            return self._process_per_timeframe(features_by_symbol, strategy, selection_config)
+
         # Update selector config if provided
         if selection_config:
             self._selector = CandidateSelector(selection_config)
@@ -118,6 +125,60 @@ class DecisionPipeline:
             "fused_decisions": fused_decisions,
             "stats": stats,
             "total_processed": len(features_by_symbol),
+        }
+
+    def _process_per_timeframe(
+        self,
+        features_by_symbol: dict[str, dict[str, FeatureSet]],
+        strategy: Strategy,
+        selection_config: SelectionConfig | None = None,
+    ) -> dict[str, Any]:
+        """Evaluate each timeframe independently.
+
+        Iterates over every (symbol, timeframe) pair as a separate candidate,
+        runs filters + strategy per pair, then selects the best overall.
+        """
+        if selection_config:
+            self._selector = CandidateSelector(selection_config)
+
+        accepted_reports, rejected_reports = self._builder.build_batch_per_tf(
+            features_by_symbol,
+            strategy,
+        )
+
+        selected = self._selector.select(accepted_reports)
+        below_threshold = [r for r in accepted_reports if r not in selected]
+        all_rejected = rejected_reports + below_threshold
+
+        fused_decisions = []
+        for report in selected:
+            fused = self._apply_fusion(report)
+            fused_decisions.append(fused)
+
+        explained_selected = []
+        for report in selected:
+            explanation = self._explanation_generator.generate(report)
+            explained_selected.append(replace(report, explanation=explanation))
+        selected = explained_selected
+
+        # Count pairs (symbol × timeframe) as processed
+        total_pairs = sum(len(tfs) for tfs in features_by_symbol.values())
+
+        stats = self._selector.get_selection_stats(accepted_reports, selected)
+        stats["rejected_count"] = len(all_rejected)
+        stats["reject_reasons"] = dict(
+            Counter(
+                r.reject_reason.value if r.reject_reason else "unknown"
+                for r in all_rejected
+            )
+        )
+
+        return {
+            "selected": selected,
+            "rejected": all_rejected,
+            "fused_decisions": fused_decisions,
+            "stats": stats,
+            "total_processed": total_pairs,
         }
 
     def process_single(

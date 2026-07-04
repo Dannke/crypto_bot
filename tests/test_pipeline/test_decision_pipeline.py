@@ -45,11 +45,13 @@ def test_decision_pipeline_selects_top_candidate():
     strategy = get_active_strategy(build_strategy_manager(settings))
     features = {
         "BTC/USDT": {
+            "1m": _feature("BTC/USDT", "1m"),
             "15m": _feature("BTC/USDT", "15m"),
             "1h": _feature("BTC/USDT", "1h"),
             "4h": _feature("BTC/USDT", "4h"),
         },
         "ETH/USDT": {
+            "1m": _feature("ETH/USDT", "1m", ema_sign=0.0),
             "15m": _feature("ETH/USDT", "15m", ema_sign=0.0),
             "1h": _feature("ETH/USDT", "1h", ema_sign=0.0),
             "4h": _feature("ETH/USDT", "4h", ema_sign=0.0),

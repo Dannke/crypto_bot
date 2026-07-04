@@ -7,5 +7,6 @@ and features. They are reused verbatim by the backtester later.
 from .base import Strategy, StrategyContext
 from .scorer import Scorer, select_top_candidates
 from .signal_engine import SignalEngine
+from .single_tf import SingleTfEngine
 
-__all__ = ["Strategy", "StrategyContext", "Scorer", "SignalEngine", "select_top_candidates"]
+__all__ = ["Strategy", "StrategyContext", "Scorer", "SignalEngine", "SingleTfEngine", "select_top_candidates"]

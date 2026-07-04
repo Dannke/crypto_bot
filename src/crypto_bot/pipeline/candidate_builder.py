@@ -168,3 +168,33 @@ class CandidateBuilder:
             rejected.extend(rejected_reports)
 
         return accepted, rejected
+
+    def build_batch_per_tf(
+        self,
+        features_by_symbol: dict[str, dict[str, FeatureSet]],
+        strategy: Strategy,
+    ) -> tuple[list[DecisionReport], list[DecisionReport]]:
+        """Build one candidate per (symbol, timeframe) pair.
+
+        Unlike ``build_batch`` (which evaluates one symbol across all its
+        timeframes at once), this method treats each timeframe as an
+        independent signal source.  Filters and the strategy are evaluated
+        separately on each timeframe's features.
+
+        Args:
+            features_by_symbol: Dictionary of symbol -> features by timeframe.
+            strategy: Strategy instance (e.g. ``SingleTfEngine``).
+
+        Returns:
+            Tuple of (accepted_reports, rejected_reports).
+        """
+        accepted = []
+        rejected = []
+        for symbol, features_by_tf in features_by_symbol.items():
+            for tf, features in features_by_tf.items():
+                single_tf = {tf: features}
+                accepted_report, rejected_reports = self.build(symbol, single_tf, strategy)
+                if accepted_report:
+                    accepted.append(accepted_report)
+                rejected.extend(rejected_reports)
+        return accepted, rejected

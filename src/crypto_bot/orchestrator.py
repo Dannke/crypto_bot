@@ -47,12 +47,15 @@ async def run_orchestrator(config: Config) -> None:
     """Main scan loop using the stage-3 decision pipeline."""
     settings = config.settings
     logger.info("Starting orchestrator in %s mode", settings.runtime.mode)
+    strategy_name = getattr(settings.runtime, "strategy", "confluence")
+    per_timeframe_mode = strategy_name == "per_timeframe"
+    logger.info("Strategy: %s%s", strategy_name, " (per-timeframe)" if per_timeframe_mode else "")
 
     db = Database(settings.storage.db_path)
     repos = Repositories(db)
     feature_builder = builder_from_settings(settings)
     pipeline = build_decision_pipeline(settings)
-    strategy_manager = build_strategy_manager(settings)
+    strategy_manager = build_strategy_manager(settings, strategy_name=strategy_name)
     strategy = get_active_strategy(strategy_manager)
     executor = SignalExecutor(config, repos, PnLTracker())
 
@@ -67,6 +70,7 @@ async def run_orchestrator(config: Config) -> None:
                 logger.info("Starting scan cycle at %s", datetime.now(tz=UTC).isoformat())
 
                 try:
+                    logger.info("--- scan cycle starts ---")
                     symbols = await resolve_symbols(client, config, feed.exchange_available)
                     if not symbols:
                         logger.warning("Universe is empty; skipping cycle")
@@ -98,10 +102,10 @@ async def run_orchestrator(config: Config) -> None:
                         trigger_tf=trigger_tf,
                     )
 
-                    result = pipeline.process(features_by_symbol, strategy)
+                    result = pipeline.process(features_by_symbol, strategy, per_timeframe=per_timeframe_mode)
                     stats: dict[str, Any] = result["stats"]
                     logger.info(
-                        "Cycle stats: processed=%d selected=%d rejected=%d avg_score=%.1f",
+                        "--- cycle: processed=%d selected=%d rejected=%d avg_score=%.1f",
                         result["total_processed"],
                         stats.get("selected_count", 0),
                         stats.get("rejected_count", 0),
@@ -109,14 +113,16 @@ async def run_orchestrator(config: Config) -> None:
                     )
                     reject_reasons = stats.get("reject_reasons") or {}
                     if reject_reasons:
-                        logger.info("Reject reasons: %s", reject_reasons)
+                        logger.info("--- reject reasons: %s", reject_reasons)
 
                     for report in result["selected"]:
                         exec_result = executor.handle_selected(report)
+                        tf = report.features.get("timeframe", "?")
                         logger.info(
-                            "%s %s score=%.1f conf=%.2f — %s",
+                            ">>> %s %s tf=%s score=%.1f conf=%.2f — %s",
                             report.signal.value,
                             report.symbol,
+                            tf,
                             report.total_score,
                             report.confidence,
                             exec_result.message,

@@ -29,8 +29,10 @@ from ..strategy.base import Strategy, StrategyContext
 from ..strategy.manager import StrategyManager
 from ..strategy.registry import StrategyRegistry
 from ..strategy.signal_engine import SignalEngine
+from ..strategy.single_tf import SingleTfEngine
 
 DEFAULT_STRATEGY_NAME = "confluence"
+PER_TF_STRATEGY_NAME = "per_timeframe"
 
 
 def scoring_weights_from_settings(settings: Settings) -> ScoringWeights:
@@ -144,6 +146,7 @@ def build_strategy_registry() -> StrategyRegistry:
     """Register built-in strategies."""
     registry = StrategyRegistry()
     registry.register(DEFAULT_STRATEGY_NAME, SignalEngine)
+    registry.register(PER_TF_STRATEGY_NAME, SingleTfEngine)
     return registry
 
 

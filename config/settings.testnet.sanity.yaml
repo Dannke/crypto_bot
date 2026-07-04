@@ -21,6 +21,7 @@ runtime:
   mode: signal_only
   loop_interval_seconds: 60
   timezone: UTC
+  strategy: per_timeframe
 
 exchange:
   name: bybit
@@ -28,8 +29,8 @@ exchange:
   rate_limit_ms: 200
 
 timeframes:
-  primary: ["15m", "1h", "4h"]
-  candles_per_tf: 250
+  primary: ["1m", "15m", "1h", "4h"]
+  candles_per_tf: 400
 
 strategy:
   trend:
