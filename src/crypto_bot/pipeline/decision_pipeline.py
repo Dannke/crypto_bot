@@ -122,6 +122,7 @@ class DecisionPipeline:
         return {
             "selected": selected,
             "rejected": all_rejected,
+            "accepted": accepted_reports,
             "fused_decisions": fused_decisions,
             "stats": stats,
             "total_processed": len(features_by_symbol),
@@ -176,6 +177,7 @@ class DecisionPipeline:
         return {
             "selected": selected,
             "rejected": all_rejected,
+            "accepted": accepted_reports,
             "fused_decisions": fused_decisions,
             "stats": stats,
             "total_processed": total_pairs,

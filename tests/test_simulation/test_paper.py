@@ -22,6 +22,7 @@ def test_sltp_long_levels():
 def test_paper_position_unrealized_pnl():
     pos = PaperPosition(
         symbol="BTC/USDT",
+        timeframe="1h",
         side=Side.LONG,
         size=1.0,
         entry_price=100.0,
@@ -36,6 +37,7 @@ def test_pnl_tracker_summary_after_close():
     tracker = PnLTracker(initial_equity=10000.0)
     pos = PaperPosition(
         symbol="BTC/USDT",
+        timeframe="1h",
         side=Side.LONG,
         size=1.0,
         entry_price=100.0,

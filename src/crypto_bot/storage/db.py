@@ -83,6 +83,28 @@ class Database:
         except sqlite3.Error as exc:
             raise StorageError(f"migration failed: {exc}") from exc
 
+        # v2: add timeframe + closed_by columns to existing databases
+        self._migrate_v2()
+
+    def _migrate_v2(self) -> None:
+        existing = self._conn.execute(
+            "SELECT value FROM schema_meta WHERE key='schema_version'"
+        ).fetchone()
+        if existing and int(existing["value"]) >= 2:
+            return
+        try:
+            self._conn.executescript("""
+                ALTER TABLE positions ADD COLUMN timeframe TEXT NOT NULL DEFAULT '';
+                ALTER TABLE positions ADD COLUMN closed_by TEXT;
+                CREATE INDEX IF NOT EXISTS idx_positions_symbol_tf_status
+                    ON positions (symbol, timeframe, status);
+                INSERT INTO schema_meta (key, value) VALUES ('schema_version', '2')
+                    ON CONFLICT(key) DO UPDATE SET value='2';
+            """)
+            self._conn.commit()
+        except sqlite3.OperationalError:
+            pass  # columns already exist
+
     def schema_version(self) -> str:
         row = self._conn.execute(
             "SELECT value FROM schema_meta WHERE key='schema_version'"
@@ -138,6 +160,14 @@ class CandleRepository:
             (symbol, timeframe),
         ).fetchone()
         return int(row["m"]) if row and row["m"] is not None else None
+
+    def latest_close(self, symbol: str) -> float | None:
+        """Latest close price for a symbol across any timeframe."""
+        row = self._db.conn.execute(
+            "SELECT close FROM candles WHERE symbol=? ORDER BY ts_ms DESC LIMIT 1",
+            (symbol,),
+        ).fetchone()
+        return float(row["close"]) if row else None
 
     def fetch(self, symbol: str, timeframe: str, limit: int = 200) -> list[Candle]:
         """Synchronous fetch."""
@@ -293,25 +323,51 @@ class PositionRepository:
     def __init__(self, db: Database) -> None:
         self._db = db
 
-    def open_exists(self, symbol: str) -> bool:
-        row = self._db.conn.execute(
-            "SELECT 1 FROM positions WHERE symbol=? AND status='open' LIMIT 1",
-            (symbol,),
-        ).fetchone()
+    def open_exists(self, symbol: str, timeframe: str | None = None) -> bool:
+        if timeframe:
+            row = self._db.conn.execute(
+                "SELECT 1 FROM positions WHERE symbol=? AND timeframe=? AND status='open' LIMIT 1",
+                (symbol, timeframe),
+            ).fetchone()
+        else:
+            row = self._db.conn.execute(
+                "SELECT 1 FROM positions WHERE symbol=? AND status='open' LIMIT 1",
+                (symbol,),
+            ).fetchone()
         return row is not None
 
-    def list_open(self) -> list[Position]:
+    def list_open(self, timeframe: str | None = None) -> list[Position]:
+        if timeframe:
+            rows = self._db.conn.execute(
+                """SELECT id, symbol, timeframe, side, size, entry_price, stop, take,
+                          opened_at_ms, status, closed_at_ms, exit_price, pnl_pct, closed_by
+                     FROM positions WHERE status='open' AND timeframe=?
+                    ORDER BY opened_at_ms""",
+                (timeframe,),
+            ).fetchall()
+        else:
+            rows = self._db.conn.execute(
+                """SELECT id, symbol, timeframe, side, size, entry_price, stop, take,
+                          opened_at_ms, status, closed_at_ms, exit_price, pnl_pct, closed_by
+                     FROM positions WHERE status='open'
+                    ORDER BY opened_at_ms"""
+            ).fetchall()
+        return [self._row_to_position(r) for r in rows]
+
+    def list_closed(self, limit: int = 100) -> list[Position]:
         rows = self._db.conn.execute(
-            """SELECT symbol, side, size, entry_price, stop, take,
-                      opened_at_ms, status, closed_at_ms, exit_price, pnl_pct
-                 FROM positions WHERE status='open'
-                ORDER BY opened_at_ms"""
+            """SELECT id, symbol, timeframe, side, size, entry_price, stop, take,
+                      opened_at_ms, status, closed_at_ms, exit_price, pnl_pct, closed_by
+                 FROM positions WHERE status='closed'
+                ORDER BY closed_at_ms DESC LIMIT ?""",
+            (limit,),
         ).fetchall()
         return [self._row_to_position(r) for r in rows]
 
     def insert(
         self,
         symbol: str,
+        timeframe: str,
         side: Side,
         size: float,
         entry_price: float,
@@ -324,11 +380,11 @@ class PositionRepository:
         with self._db.transaction() as conn:
             cur = conn.execute(
                 """INSERT INTO positions
-                   (symbol, side, size, entry_price, stop, take, status,
+                   (symbol, timeframe, side, size, entry_price, stop, take, status,
                     opened_at_ms, mode)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
-                    symbol, side.value, float(size), float(entry_price),
+                    symbol, timeframe, side.value, float(size), float(entry_price),
                     float(stop), float(take), status.value,
                     opened_at_ms or _now_ms(), mode.value,
                 ),
@@ -341,18 +397,68 @@ class PositionRepository:
         exit_price: float,
         pnl_pct: float,
         closed_at_ms: int | None = None,
+        closed_by: str | None = None,
     ) -> None:
         with self._db.transaction() as conn:
             conn.execute(
                 """UPDATE positions
                       SET status='closed', exit_price=?, pnl_pct=?,
-                          closed_at_ms=?, updated_at=?
+                          closed_at_ms=?, closed_by=?, updated_at=?
                     WHERE id=?""",
                 (
                     float(exit_price), float(pnl_pct),
-                    closed_at_ms or _now_ms(), _utc_iso(), position_id,
+                    closed_at_ms or _now_ms(), closed_by, _utc_iso(), position_id,
                 ),
             )
+
+    def close_all_open(
+        self,
+        exit_price: float,
+        closed_by: str = "manual",
+    ) -> int:
+        """Close every open position at the given price. Returns count closed."""
+        now_ms = _now_ms()
+        with self._db.transaction() as conn:
+            open_rows = conn.execute(
+                """SELECT id, symbol, side, entry_price, size
+                     FROM positions WHERE status='open'"""
+            ).fetchall()
+            count = 0
+            for row in open_rows:
+                pid = int(row["id"])
+                entry = float(row["entry_price"])
+                size = float(row["size"])
+                side = Side(row["side"])
+                # Record exit trade
+                conn.execute(
+                    """INSERT INTO trades
+                       (position_id, symbol, side, order_type, size, price, status, ts_ms, mode)
+                       VALUES (?, ?, ?, 'market', ?, ?, 'filled', ?, 'paper')""",
+                    (pid, row["symbol"], row["side"], size, float(exit_price), now_ms),
+                )
+                # Calculate break-even P&L (at exit_price equals entry → 0%)
+                # If exit_price differs, calculate actual P&L
+                if side == Side.LONG:
+                    pnl_abs = (exit_price - entry) * size
+                else:
+                    pnl_abs = (entry - exit_price) * size
+                pnl_pct = (pnl_abs / (entry * size)) * 100.0 if (entry * size) > 0 else 0.0
+                conn.execute(
+                    """UPDATE positions
+                          SET status='closed', exit_price=?, pnl_pct=?,
+                              closed_at_ms=?, closed_by=?, updated_at=?
+                        WHERE id=?""",
+                    (float(exit_price), round(pnl_pct, 4), now_ms, closed_by, _utc_iso(), pid),
+                )
+                count += 1
+            return count
+
+    def delete_all(self) -> int:
+        """Delete all position records. Returns count deleted."""
+        with self._db.transaction() as conn:
+            conn.execute("DELETE FROM trades")
+            cur = conn.execute("DELETE FROM positions")
+            return cur.rowcount
 
     def _row_to_position(self, r: sqlite3.Row) -> Position:
         opened = datetime.fromtimestamp(r["opened_at_ms"] / 1000.0, tz=UTC)
@@ -362,13 +468,16 @@ class PositionRepository:
             else None
         )
         return Position(
+            id=int(r["id"]),
             symbol=r["symbol"],
+            timeframe=r["timeframe"],
             side=Side(r["side"]),
             size=float(r["size"]),
             entry_price=float(r["entry_price"]),
             stop=float(r["stop"]),
             take=float(r["take"]),
             opened_at=opened,
+            closed_by=r["closed_by"],
             status=TradeStatus(r["status"]),
             closed_at=closed,
             exit_price=float(r["exit_price"]) if r["exit_price"] is not None else None,

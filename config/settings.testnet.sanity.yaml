@@ -18,7 +18,7 @@
 # =============================================================================
 
 runtime:
-  mode: signal_only
+  mode: paper
   loop_interval_seconds: 60
   timezone: UTC
   strategy: per_timeframe
@@ -37,7 +37,7 @@ strategy:
     ema_fast: 21
     ema_mid: 50
     ema_slow: 200
-    adx_min: 1.0          # near-disabled: any measurable trend passes
+    adx_min: 1.0 # near-disabled: any measurable trend passes
   momentum:
     rsi_period: 14
     rsi_long_min: 50.0
@@ -46,13 +46,13 @@ strategy:
     rsi_short_max: 50.0
   volatility:
     atr_period: 14
-    atr_min_pct: 0.01     # near-disabled: almost any movement passes
-    atr_max_pct: 100.0    # near-disabled: no upper cap in practice
+    atr_min_pct: 0.01 # near-disabled: almost any movement passes
+    atr_max_pct: 100.0 # near-disabled: no upper cap in practice
     bb_period: 20
     bb_std: 2.0
   volume:
     ma_period: 20
-    spike_ratio: 1.0      # baseline volume already counts as a "spike"
+    spike_ratio: 1.0 # baseline volume already counts as a "spike"
 
 scoring:
   weights:
@@ -63,14 +63,14 @@ scoring:
     liquidity: 0.10
     spread: 0.05
     risk: 0.20
-  min_score: 0.0           # accept anything that clears the filters
-  min_confidence: 0.0      # accept anything that clears the filters
+  min_score: 0.0 # accept anything that clears the filters
+  min_confidence: 0.0 # accept anything that clears the filters
   max_candidates_per_cycle: 10
 
 filters:
-  enable_liquidity_filter: false   # testnet volume data is unreliable, see settings.testnet.yaml
+  enable_liquidity_filter: false # testnet volume data is unreliable, see settings.testnet.yaml
   enable_spread_filter: false
-  enable_volume_filter: false      # same reason — testnet spot volume is near-zero/flat
+  enable_volume_filter: false # same reason — testnet spot volume is near-zero/flat
   min_quote_volume_usd: 1000.0
   max_spread_pct: 5.0
   min_volume_score: 0.0

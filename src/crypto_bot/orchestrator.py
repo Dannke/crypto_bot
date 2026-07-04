@@ -11,7 +11,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from .config.env import Config
-from .core.enums import RejectReason
+from .core.enums import Mode, RejectReason
 from .core.exceptions import OrchestratorError
 from .core.logging_setup import get_logger
 from .data.exchange import MarketDataClient
@@ -61,6 +61,7 @@ async def run_orchestrator(config: Config) -> None:
 
     quote = settings.universe.quote.upper()
     trigger_tf = settings.timeframes.primary[0]
+    is_paper = settings.runtime.mode == Mode.PAPER
 
     try:
         async with MarketDataClient(config) as client:
@@ -115,6 +116,7 @@ async def run_orchestrator(config: Config) -> None:
                     if reject_reasons:
                         logger.info("--- reject reasons: %s", reject_reasons)
 
+                    # ---- handle selected signals (all modes) ----
                     for report in result["selected"]:
                         exec_result = executor.handle_selected(report)
                         tf = report.features.get("timeframe", "?")
@@ -127,6 +129,69 @@ async def run_orchestrator(config: Config) -> None:
                             report.confidence,
                             exec_result.message,
                         )
+
+                    # ---- paper mode: open positions for ALL accepted reports ----
+                    if is_paper:
+                        accepted = result.get("accepted", [])
+                        for report in accepted:
+                            if report in result["selected"]:
+                                continue  # already handled above
+                            exec_result = executor.handle_selected(report)
+                            if exec_result.handled:
+                                tf = report.features.get("timeframe", "?")
+                                logger.info(
+                                    "  paper+ %s %s tf=%s score=%.1f — %s",
+                                    report.signal.value,
+                                    report.symbol,
+                                    tf,
+                                    report.total_score,
+                                    exec_result.message,
+                                )
+
+                    # ---- paper mode: check open positions for SL/TP ----
+                    pos_close_stats: dict[str, Any] = {}
+                    if is_paper:
+                        current_prices: dict[str, dict[str, float]] = {}
+                        if tickers:
+                            for sym in symbols:
+                                last = tickers.get(sym, {}).get("last", 0.0)
+                                if last > 0:
+                                    current_prices[sym] = {tf: last for tf in settings.timeframes.primary}
+                        # fallback to candle close for symbols not covered by tickers
+                        for sf in feeds:
+                            if sf.symbol in current_prices:
+                                continue
+                            for tf, candles in sf.by_timeframe.items():
+                                if candles:
+                                    current_prices.setdefault(sf.symbol, {})[tf] = candles[-1].close
+                        if current_prices:
+                            pos_close_stats = executor.check_positions(current_prices)
+
+                    if pos_close_stats:
+                        total_closed = pos_close_stats["closed_by_sl"] + pos_close_stats["closed_by_tp"]
+                        if total_closed:
+                            logger.info(
+                                "--- positions closed: %d (SL=%d pnl=%.2f, TP=%d pnl=%.2f)",
+                                total_closed,
+                                pos_close_stats["closed_by_sl"],
+                                pos_close_stats["closed_by_sl_pnl"],
+                                pos_close_stats["closed_by_tp"],
+                                pos_close_stats["closed_by_tp_pnl"],
+                            )
+
+                            # Log summary
+                            summary = executor.tracker.get_summary()
+                            if summary.total_trades > 0:
+                                logger.info(
+                                    "--- pnl summary: trades=%d win_rate=%.1f%% total_pnl=%.2f (%.2f%%)"
+                                    "  SL=%d(%.2f) TP=%d(%.2f)",
+                                    summary.total_trades,
+                                    summary.win_rate * 100,
+                                    summary.total_pnl_abs,
+                                    summary.total_pnl_pct,
+                                    summary.closed_by_sl, summary.pnl_from_sl,
+                                    summary.closed_by_tp, summary.pnl_from_tp,
+                                )
 
                     for report in result["rejected"]:
                         executor.handle_rejected(_normalize_rejected(report))
@@ -144,6 +209,20 @@ async def run_orchestrator(config: Config) -> None:
         logger.critical("Orchestrator crashed", exc_info=True)
         raise OrchestratorError("Orchestrator failure") from exc
     finally:
+        # Log final summary on shutdown
+        if is_paper:
+            summary = executor.tracker.get_summary()
+            logger.info(
+                "=== FINAL paper pnl: trades=%d win_rate=%.1f%% total=%.2f (%.2f%%)"
+                "  SL=%d(%.2f) TP=%d(%.2f) max_dd=%.2f%%",
+                summary.total_trades,
+                summary.win_rate * 100,
+                summary.total_pnl_abs,
+                summary.total_pnl_pct,
+                summary.closed_by_sl, summary.pnl_from_sl,
+                summary.closed_by_tp, summary.pnl_from_tp,
+                summary.max_drawdown_pct,
+            )
         db.close()
 
 

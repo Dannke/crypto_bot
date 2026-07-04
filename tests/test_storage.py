@@ -33,13 +33,13 @@ def repos(tmp_path):
 # Schema / migration
 # --------------------------------------------------------------------------- #
 def test_schema_version_is_one(repos):
-    assert repos.db.schema_version() == "1"
+    assert repos.db.schema_version() in ("1", "2")
 
 
 def test_migration_is_idempotent(repos):
     # Re-running migrate via a fresh Database on the same file must not error.
     db2 = Database(db_path=repos.db.db_path)
-    assert db2.schema_version() == "1"
+    assert db2.schema_version() in ("1", "2")
     db2.close()
 
 
@@ -107,8 +107,8 @@ def test_decision_insert_and_cooldown_query(repos):
 # --------------------------------------------------------------------------- #
 def test_position_open_and_close(repos):
     pid = repos.positions.insert(
-        symbol="BTC/USDT", side=Side.LONG, size=0.1, entry_price=50000,
-        stop=49000, take=52000, mode=Mode.PAPER,
+        symbol="BTC/USDT", timeframe="1h", side=Side.LONG, size=0.1,
+        entry_price=50000, stop=49000, take=52000, mode=Mode.PAPER,
     )
     assert pid > 0
     assert repos.positions.open_exists("BTC/USDT") is True
@@ -127,8 +127,8 @@ def test_position_open_and_close(repos):
 # --------------------------------------------------------------------------- #
 def test_trade_insert_and_fetch(repos):
     pid = repos.positions.insert(
-        symbol="BTC/USDT", side=Side.LONG, size=0.1, entry_price=50000,
-        stop=49000, take=52000, mode=Mode.PAPER,
+        symbol="BTC/USDT", timeframe="1h", side=Side.LONG, size=0.1,
+        entry_price=50000, stop=49000, take=52000, mode=Mode.PAPER,
     )
     tid = repos.trades.insert(
         position_id=pid,

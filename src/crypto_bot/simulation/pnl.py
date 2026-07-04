@@ -28,6 +28,11 @@ class PnLSummary:
     max_drawdown_pct: float = 0.0
     max_profit_pct: float = 0.0
     sharpe_ratio: float = 0.0
+    closed_by_sl: int = 0
+    closed_by_tp: int = 0
+    closed_by_other: int = 0
+    pnl_from_sl: float = 0.0
+    pnl_from_tp: float = 0.0
 
 
 @dataclass(slots=True)
@@ -45,9 +50,10 @@ class PnLTracker:
         self.positions.append(position)
         self._update_equity()
 
-    def close_position(self, position: PaperPosition, exit_price: float) -> None:
+    def close_position(self, position: PaperPosition, exit_price: float, *,
+                       closed_by: str | None = None) -> None:
         """Close a position and update P&L."""
-        position.close(exit_price)
+        position.close(exit_price, closed_by=closed_by)
         self._update_equity()
         self.equity_history.append((datetime.now(tz=UTC), self.current_equity))
 
@@ -79,6 +85,15 @@ class PnLTracker:
         avg_win_pct = sum(wins) / len(wins) if wins else 0.0
         avg_loss_pct = sum(losses) / len(losses) if losses else 0.0
 
+        # Calculate closed-by breakdown
+        closed_by_sl = sum(1 for p in closed_positions if p.closed_by == "stop_loss")
+        closed_by_tp = sum(1 for p in closed_positions if p.closed_by == "take_profit")
+
+        pnl_from_sl = sum(p.pnl_abs or 0.0 for p in closed_positions if p.closed_by == "stop_loss")
+        pnl_from_tp = sum(p.pnl_abs or 0.0 for p in closed_positions if p.closed_by == "take_profit")
+
+        closed_by_other = total_trades - closed_by_sl - closed_by_tp
+
         # Calculate max drawdown
         max_drawdown_pct = 0.0
         if len(self.equity_history) > 1:
@@ -108,6 +123,11 @@ class PnLTracker:
             max_drawdown_pct=round(max_drawdown_pct, 2),
             max_profit_pct=round(max_profit_pct, 2),
             sharpe_ratio=round(sharpe_ratio, 2),
+            closed_by_sl=closed_by_sl,
+            closed_by_tp=closed_by_tp,
+            closed_by_other=closed_by_other,
+            pnl_from_sl=round(pnl_from_sl, 2),
+            pnl_from_tp=round(pnl_from_tp, 2),
         )
 
     def get_open_positions_pnl(self, current_prices: dict[str, float]) -> dict[str, float]:

@@ -79,6 +79,7 @@ CREATE INDEX IF NOT EXISTS idx_decisions_accepted  ON decisions (accepted);
 CREATE TABLE IF NOT EXISTS positions (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
     symbol        TEXT    NOT NULL,
+    timeframe     TEXT    NOT NULL,
     side          TEXT    NOT NULL CHECK (side IN ('LONG','SHORT')),
     size          REAL    NOT NULL,
     entry_price   REAL    NOT NULL,
@@ -86,6 +87,7 @@ CREATE TABLE IF NOT EXISTS positions (
     take          REAL    NOT NULL,
     status        TEXT    NOT NULL DEFAULT 'open'
                   CHECK (status IN ('proposed','open','closed','rejected','cancelled')),
+    closed_by     TEXT        CHECK (closed_by IS NULL OR closed_by IN ('stop_loss','take_profit','manual','signal')),
     opened_at_ms  INTEGER NOT NULL,
     closed_at_ms  INTEGER,
     exit_price    REAL,
@@ -133,6 +135,8 @@ CREATE TABLE IF NOT EXISTS equity (
 
 CREATE INDEX IF NOT EXISTS idx_equity_ts ON equity (ts_ms);
 
+CREATE INDEX IF NOT EXISTS idx_positions_symbol_tf_status ON positions (symbol, timeframe, status);
+
 -- ---- schema version ---------------------------------------------------------
-INSERT INTO schema_meta (key, value) VALUES ('schema_version', '1')
+INSERT INTO schema_meta (key, value) VALUES ('schema_version', '2')
     ON CONFLICT(key) DO NOTHING;

@@ -148,13 +148,16 @@ class ScoredCandidate:
 class Position:
     """An open or historical position (paper or live)."""
 
-    symbol: str
-    side: Side
-    size: float                   # in base currency
-    entry_price: float
-    stop: float
-    take: float
-    opened_at: datetime
+    id: int = 0
+    symbol: str = ""
+    timeframe: str = ""
+    side: Side = Side.LONG
+    size: float = 0.0            # in base currency
+    entry_price: float = 0.0
+    stop: float = 0.0
+    take: float = 0.0
+    opened_at: datetime | None = None
+    closed_by: str | None = None  # stop_loss | take_profit | manual | signal
     status: TradeStatus = TradeStatus.OPEN
     closed_at: datetime | None = None
     exit_price: float | None = None

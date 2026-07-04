@@ -16,6 +16,7 @@ class PaperPosition:
     """A virtual trading position for paper trading simulation."""
 
     symbol: str
+    timeframe: str
     side: Side
     size: float  # in base currency
     entry_price: float
@@ -27,6 +28,7 @@ class PaperPosition:
     exit_time: datetime | None = None
     pnl_pct: float | None = None
     pnl_abs: float | None = None
+    closed_by: str | None = None  # stop_loss | take_profit | manual | signal
 
     @property
     def is_open(self) -> bool:
@@ -56,7 +58,8 @@ class PaperPosition:
             return (current_price - self.entry_price) * self.size
         return (self.entry_price - current_price) * self.size
 
-    def close(self, exit_price: float, exit_time: datetime | None = None) -> None:
+    def close(self, exit_price: float, exit_time: datetime | None = None, *,
+              closed_by: str | None = None) -> None:
         """Close the position at the given price."""
         if not self.is_open:
             raise ValueError("Position is already closed")
@@ -64,6 +67,7 @@ class PaperPosition:
         self.exit_price = exit_price
         self.exit_time = exit_time or datetime.now(tz=UTC)
         self.status = TradeStatus.CLOSED
+        self.closed_by = closed_by
 
         # Calculate realized P&L
         if self.side == Side.LONG:
@@ -97,6 +101,7 @@ class PaperPosition:
         """Convert position to dictionary for logging/serialization."""
         return {
             "symbol": self.symbol,
+            "timeframe": self.timeframe,
             "side": self.side.value,
             "size": self.size,
             "entry_price": self.entry_price,
@@ -106,6 +111,7 @@ class PaperPosition:
             "status": self.status.value,
             "exit_price": self.exit_price,
             "exit_time": self.exit_time.isoformat() if self.exit_time else None,
+            "closed_by": self.closed_by,
             "pnl_pct": self.pnl_pct,
             "pnl_abs": self.pnl_abs,
         }
