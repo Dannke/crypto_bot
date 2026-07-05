@@ -14,6 +14,7 @@ from .config.env import Config
 from .core.enums import Mode, RejectReason
 from .core.exceptions import OrchestratorError
 from .core.logging_setup import get_logger
+from .core.policy import timeframe_to_seconds
 from .data.exchange import MarketDataClient
 from .data.feed import Feed, resolve_symbols
 from .decision.decision_report import DecisionReport
@@ -27,6 +28,7 @@ from .pipeline.factory import (
 )
 from .simulation.executor import SignalExecutor
 from .simulation.pnl import PnLTracker
+from .simulation.price_simulator import PriceSimulator
 from .storage.db import Database, Repositories
 
 logger = get_logger(__name__)
@@ -62,6 +64,29 @@ async def run_orchestrator(config: Config) -> None:
     quote = settings.universe.quote.upper()
     trigger_tf = settings.timeframes.primary[0]
     is_paper = settings.runtime.mode == Mode.PAPER
+
+    price_sim = PriceSimulator()
+    executor_lock = asyncio.Lock()
+    sim_task: asyncio.Task[None] | None = None
+
+    async def _sim_check_positions() -> None:
+        """Called from background tick every ~1s under lock."""
+        open_syms = executor.tracker.open_symbols()
+        if not open_syms:
+            return
+        sym_tfs = {s: settings.timeframes.primary for s in open_syms}
+        async with executor_lock:
+            current_prices = price_sim.get_current_prices(sym_tfs)
+            if current_prices:
+                stats = executor.check_positions(current_prices)
+                total = stats["closed_by_sl"] + stats["closed_by_tp"]
+                if total:
+                    logger.info(
+                        "tick SL/TP: %d closed (SL=%d pnl=%.2f, TP=%d pnl=%.2f)",
+                        total,
+                        stats["closed_by_sl"], stats["closed_by_sl_pnl"],
+                        stats["closed_by_tp"], stats["closed_by_tp_pnl"],
+                    )
 
     try:
         async with MarketDataClient(config) as client:
@@ -116,85 +141,74 @@ async def run_orchestrator(config: Config) -> None:
                     if reject_reasons:
                         logger.info("--- reject reasons: %s", reject_reasons)
 
-                    # ---- handle selected signals (all modes) ----
-                    for report in result["selected"]:
-                        exec_result = executor.handle_selected(report)
-                        tf = report.features.get("timeframe", "?")
-                        logger.info(
-                            ">>> %s %s tf=%s score=%.1f conf=%.2f — %s",
-                            report.signal.value,
-                            report.symbol,
-                            tf,
-                            report.total_score,
-                            report.confidence,
-                            exec_result.message,
-                        )
-
-                    # ---- paper mode: open positions for ALL accepted reports ----
-                    if is_paper:
-                        accepted = result.get("accepted", [])
-                        for report in accepted:
-                            if report in result["selected"]:
-                                continue  # already handled above
+                    # ---- handle selected signals (under lock) ----
+                    async with executor_lock:
+                        for report in result["selected"]:
                             exec_result = executor.handle_selected(report)
-                            if exec_result.handled:
-                                tf = report.features.get("timeframe", "?")
-                                logger.info(
-                                    "  paper+ %s %s tf=%s score=%.1f — %s",
-                                    report.signal.value,
-                                    report.symbol,
-                                    tf,
-                                    report.total_score,
-                                    exec_result.message,
-                                )
-
-                    # ---- paper mode: check open positions for SL/TP ----
-                    pos_close_stats: dict[str, Any] = {}
-                    if is_paper:
-                        current_prices: dict[str, dict[str, float]] = {}
-                        if tickers:
-                            for sym in symbols:
-                                last = tickers.get(sym, {}).get("last", 0.0)
-                                if last > 0:
-                                    current_prices[sym] = {tf: last for tf in settings.timeframes.primary}
-                        # fallback to candle close for symbols not covered by tickers
-                        for sf in feeds:
-                            if sf.symbol in current_prices:
-                                continue
-                            for tf, candles in sf.by_timeframe.items():
-                                if candles:
-                                    current_prices.setdefault(sf.symbol, {})[tf] = candles[-1].close
-                        if current_prices:
-                            pos_close_stats = executor.check_positions(current_prices)
-
-                    if pos_close_stats:
-                        total_closed = pos_close_stats["closed_by_sl"] + pos_close_stats["closed_by_tp"]
-                        if total_closed:
+                            tf = report.features.get("timeframe", "?")
                             logger.info(
-                                "--- positions closed: %d (SL=%d pnl=%.2f, TP=%d pnl=%.2f)",
-                                total_closed,
-                                pos_close_stats["closed_by_sl"],
-                                pos_close_stats["closed_by_sl_pnl"],
-                                pos_close_stats["closed_by_tp"],
-                                pos_close_stats["closed_by_tp_pnl"],
+                                ">>> %s %s tf=%s score=%.1f conf=%.2f — %s",
+                                report.signal.value,
+                                report.symbol,
+                                tf,
+                                report.total_score,
+                                report.confidence,
+                                exec_result.message,
                             )
 
-                            # Log summary
-                            summary = executor.tracker.get_summary()
-                            if summary.total_trades > 0:
-                                logger.info(
-                                    "--- pnl summary: trades=%d win_rate=%.1f%% total_pnl=%.2f (%.2f%%)"
-                                    "  SL=%d(%.2f) TP=%d(%.2f)",
-                                    summary.total_trades,
-                                    summary.win_rate * 100,
-                                    summary.total_pnl_abs,
-                                    summary.total_pnl_pct,
-                                    summary.closed_by_sl, summary.pnl_from_sl,
-                                    summary.closed_by_tp, summary.pnl_from_tp,
-                                )
+                        # ---- paper mode: open positions for ALL accepted reports ----
+                        if is_paper:
+                            accepted = result.get("accepted", [])
+                            for report in accepted:
+                                if report in result["selected"]:
+                                    continue
+                                exec_result = executor.handle_selected(report)
+                                if exec_result.handled:
+                                    tf = report.features.get("timeframe", "?")
+                                    logger.info(
+                                        "  paper+ %s %s tf=%s score=%.1f — %s",
+                                        report.signal.value,
+                                        report.symbol,
+                                        tf,
+                                        report.total_score,
+                                        exec_result.message,
+                                    )
 
-                    for report in result["rejected"]:
-                        executor.handle_rejected(_normalize_rejected(report))
+                        for report in result["rejected"]:
+                            executor.handle_rejected(_normalize_rejected(report))
+
+                    # ---- update price simulator anchors from tickers + features ----
+                    if is_paper:
+                        for sym in symbols:
+                            if tickers and sym in tickers:
+                                last = tickers[sym].get("last", 0.0)
+                                if last > 0:
+                                    fs_dict = features_by_symbol.get(sym, {})
+                                    fs = fs_dict.get(trigger_tf) if fs_dict else None
+                                    atr_pct = fs.atr_pct if fs is not None else None
+                                    price_sim.set_anchor(sym, price=last, atr_pct=atr_pct,
+                                                         candle_seconds=timeframe_to_seconds(trigger_tf))
+                        # fallback: символы без тикера — из последней свечи
+                        for sf in feeds:
+                            if sf.symbol in price_sim.tracked_symbols():
+                                continue
+                            for candles in sf.by_timeframe.values():
+                                if candles:
+                                    price_sim.set_anchor(sf.symbol, price=candles[-1].close)
+                                    break
+
+                    # ---- start background tick loop after first anchor ----
+                    if is_paper and sim_task is None and price_sim.tracked_symbols():
+                        logger.info(
+                            "starting price simulator background tick for %d symbols",
+                            len(price_sim.tracked_symbols()),
+                        )
+                        sim_task = asyncio.create_task(
+                            price_sim.run_forever(
+                                symbols_provider=price_sim.tracked_symbols,
+                                on_cycle_end=_sim_check_positions,
+                            )
+                        )
 
                 except Exception as exc:  # noqa: BLE001
                     logger.error("Cycle error: %s", exc, exc_info=True)
@@ -209,6 +223,8 @@ async def run_orchestrator(config: Config) -> None:
         logger.critical("Orchestrator crashed", exc_info=True)
         raise OrchestratorError("Orchestrator failure") from exc
     finally:
+        if sim_task is not None:
+            sim_task.cancel()
         # Log final summary on shutdown
         if is_paper:
             summary = executor.tracker.get_summary()

@@ -130,6 +130,9 @@ class PnLTracker:
             pnl_from_tp=round(pnl_from_tp, 2),
         )
 
+    def open_symbols(self) -> set[str]:
+        return {p.symbol for p in self.positions if p.is_open}
+
     def get_open_positions_pnl(self, current_prices: dict[str, float]) -> dict[str, float]:
         """Get unrealized P&L for all open positions.
 

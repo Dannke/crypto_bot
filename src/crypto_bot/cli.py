@@ -155,6 +155,19 @@ def positions(ctx, config, output_format, status, out_path):
     symbols = {p.symbol for p in rows if p.status.value == "open"}
     current_prices = _fetch_current_prices(config_obj, repos, symbols) if symbols else {}
 
+    closed_rows = [p for p in rows if p.status.value == "closed"]
+    total_closed = len(closed_rows)
+    if total_closed:
+        wins = [p for p in closed_rows if p.pnl_pct is not None and p.pnl_pct > 0]
+        by_sl = [p for p in closed_rows if p.closed_by == "stop_loss"]
+        by_tp = [p for p in closed_rows if p.closed_by == "take_profit"]
+        win_rate = len(wins) / total_closed * 100
+        total_pnl = sum(p.pnl_pct or 0.0 for p in closed_rows)
+        sl_pnl = sum(p.pnl_pct or 0.0 for p in by_sl)
+        tp_pnl = sum(p.pnl_pct or 0.0 for p in by_tp)
+    else:
+        win_rate = total_pnl = sl_pnl = tp_pnl = 0.0
+
     def unrealized_pnl(entry: float, price: float, side) -> float | None:
         if price <= 0:
             return None
@@ -189,6 +202,18 @@ def positions(ctx, config, output_format, status, out_path):
             }
             for p in rows
         ]
+        summary_block = {
+            "summary": {
+                "total_closed": total_closed,
+                "win_rate_pct": round(win_rate, 1),
+                "total_pnl_pct": round(total_pnl, 2),
+                "closed_by_sl": len(by_sl),
+                "sl_pnl_pct": round(sl_pnl, 2),
+                "closed_by_tp": len(by_tp),
+                "tp_pnl_pct": round(tp_pnl, 2),
+            }
+        }
+        data.append(summary_block)
         output = json.dumps(data, indent=2, ensure_ascii=False)
     elif output_format == "csv":
         buf = io.StringIO()
@@ -213,6 +238,14 @@ def positions(ctx, config, output_format, status, out_path):
                 p.opened_at.isoformat() if p.opened_at else "",
                 p.closed_at.isoformat() if p.closed_at else "",
             ])
+        if total_closed:
+            writer.writerow([])
+            writer.writerow(["summary", "", "", "", "", "", "", "", "", "", "", "", "", "", ""])
+            writer.writerow(["total_closed", total_closed])
+            writer.writerow(["win_rate%", f"{win_rate:.1f}"])
+            writer.writerow(["total_pnl%", f"{total_pnl:+.2f}"])
+            writer.writerow(["closed_by_sl", len(by_sl), "pnl%", f"{sl_pnl:+.2f}"])
+            writer.writerow(["closed_by_tp", len(by_tp), "pnl%", f"{tp_pnl:+.2f}"])
         output = buf.getvalue()
     else:
         header = (
@@ -238,6 +271,13 @@ def positions(ctx, config, output_format, status, out_path):
                 f"{exit_str:>11} {pnl_str:>7} {opened_str:<16}"
             )
         lines.append(sep)
+        if total_closed:
+            lines.append("")
+            lines.append(f"  Closed: {total_closed}  Win rate: {win_rate:.1f}%  "
+                         f"Total P&L: {total_pnl:+.2f}%")
+            lines.append(f"  SL: {len(by_sl)} ({sl_pnl:+.2f}%)  "
+                         f"TP: {len(by_tp)} ({tp_pnl:+.2f}%)  "
+                         f"Other: {total_closed - len(by_sl) - len(by_tp)}")
         output = "\n".join(lines)
 
     if out_path:

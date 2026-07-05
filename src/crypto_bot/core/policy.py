@@ -46,6 +46,11 @@ def timeframe_to_minutes(tf: str) -> int:
     return _TIMEFRAME_MINUTES[tf]
 
 
+def timeframe_to_seconds(tf: str) -> int:
+    """Return the length of a timeframe in seconds."""
+    return _TIMEFRAME_MINUTES[tf] * 60
+
+
 def is_timeframe_allowed(tf: str) -> bool:
     return tf in ALLOWED_TIMEFRAMES
 

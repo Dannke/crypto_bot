@@ -7,8 +7,8 @@ pydantic-settings>=2.3.0
 PyYAML>=6.0.1
 aiohttp>=3.9.0
 
-# Dev / test (also declared under [project.optional-dependencies] in pyproject.toml)
-# pytest>=8.2.0
-# pytest-asyncio>=0.23.0
-# ruff>=0.4.0
-# mypy>=1.10.0
+# Dev / test
+pytest>=8.2.0
+pytest-asyncio>=0.23.0
+ruff>=0.4.0
+mypy>=1.10.0
