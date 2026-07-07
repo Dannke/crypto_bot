@@ -14,7 +14,6 @@ from crypto_bot.core.exceptions import ConfigError
 from crypto_bot.orchestrator import run_orchestrator
 from crypto_bot.storage.db import Database, Repositories
 
-
 # --------------------------------------------------------------------------- #
 # Shared helpers
 # --------------------------------------------------------------------------- #
@@ -287,6 +286,94 @@ def positions(ctx, config, output_format, status, out_path):
         click.echo(output)
 
     db.close()
+
+
+@cli.command()
+@click.argument("symbol", type=str)
+@click.argument("timeframe", type=str)
+@click.option("--start", default=None, help="Start datetime (ISO format, e.g. 2025-01-01)")
+@click.option("--end", default=None, help="End datetime (ISO format, e.g. 2025-02-01)")
+@click.option("--conflict", default="pessimistic", type=click.Choice(["pessimistic", "open_proximity"]))
+@click.option("--config", default=None, help="Path to settings YAML file")
+@click.pass_context
+def backtest(ctx, symbol, timeframe, start, end, conflict, config):
+    """Запуск backtest для одной пары на одном таймфрейме."""
+    config_path = config or ctx.obj.get("config", "config/settings.yaml")
+    from datetime import datetime as dt_mod
+
+    try:
+        config_obj = load_settings(yaml_path=Path(config_path))
+    except ConfigError as e:
+        click.echo(f"❌ Configuration error: {e}", err=True)
+        sys.exit(1)
+
+    # Resolve start/end timestamps
+    now = dt_mod.now()
+    if start:
+        start_dt = dt_mod.fromisoformat(start)
+        start_ms = int(start_dt.timestamp() * 1000)
+    else:
+        start_ms = int((now.timestamp() - 7 * 86400) * 1000)  # default: last 7 days
+
+    if end:
+        end_dt = dt_mod.fromisoformat(end)
+        end_ms = int(end_dt.timestamp() * 1000)
+    else:
+        end_ms = int(now.timestamp() * 1000)
+
+    from crypto_bot.simulation.backtester import Backtester
+
+    # Isolated DB per run — never touches the live paper-trading DB
+    safe_sym = symbol.upper().replace("/", "_")
+    run_id = f"{safe_sym}_{timeframe}_{start_ms}_{end_ms}"
+    bt_db_path = Path("data/backtest") / f"{run_id}.db"
+    bt_db_path.parent.mkdir(parents=True, exist_ok=True)
+
+    bt = Backtester(
+        config_obj,
+        symbol=symbol.upper(),
+        timeframe=timeframe,
+        start_ms=start_ms,
+        end_ms=end_ms,
+        conflict_resolution=conflict,
+        db=Database(bt_db_path),
+    )
+
+    click.echo(f"Running backtest: {symbol} {timeframe} [{start_ms} .. {end_ms}]")
+    summary = bt.run()
+
+    click.echo(f"\n{'='*60}")
+    click.echo(f"  BACKTEST RESULTS — {symbol} {timeframe}")
+    click.echo(f"{'='*60}")
+    click.echo(f"  Total trades:   {summary.total_trades}")
+    click.echo(f"  Win rate:       {summary.win_rate*100:.1f}%")
+    click.echo(f"  Total P&L:      {summary.total_pnl_pct:+.2f}%")
+    click.echo(f"  Closed by SL:   {summary.closed_by_sl}")
+    click.echo(f"  Closed by TP:   {summary.closed_by_tp}")
+    click.echo(f"  Max drawdown:   {summary.max_drawdown_pct:.2f}%")
+    click.echo(f"  Sharpe (simpl): {summary.sharpe_ratio:.2f}")
+    click.echo(f"{'='*60}\n")
+
+
+@cli.command()
+@click.argument("symbol", type=str)
+@click.argument("timeframe", type=str)
+@click.option("--start", default=None, help="Start datetime (ISO format, e.g. 2025-01-01)")
+@click.option("--end", default=None, help="End datetime (ISO format)")
+@click.option("--network", default="mainnet", type=click.Choice(["mainnet", "testnet", "auto"]),
+              help="Exchange network (default: mainnet — testnet has sparse history)")
+@click.option("--config", default=None, help="Path to settings YAML file")
+@click.pass_context
+def seed_history(ctx, symbol, timeframe, start, end, network, config):
+    """Загрузка исторических OHLCV данных с биржи в локальную БД."""
+    config_path = config or ctx.obj.get("config", "config/settings.yaml")
+    import asyncio as _asyncio
+
+    from crypto_bot.simulation.seed_history import _run as seed_run
+    _asyncio.run(seed_run(
+        symbol=symbol.upper(), timeframe=timeframe,
+        start=start, end=end, network=network, config_path=config_path,
+    ))
 
 
 @cli.command()

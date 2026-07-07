@@ -114,3 +114,52 @@ async def test_run_forever_calls_on_tick_for_each_symbol():
         await task
     assert len(seen) >= 3
     assert all(symbol == "BTC/USDT" for symbol, _ in seen)
+
+
+def test_simulated_spike_triggers_stop_loss():
+    """Цена пробивает SL между скан-циклами — позиция закрывается.
+
+    Воспроизводит сценарий, ради которого писался PriceSimulator:
+    скачок цены уходит ниже SL и возвращается обратно; проверка,
+    что check_stop_loss срабатывает в момент касания, а не постфактум
+    по усреднённой цене.
+    """
+    from crypto_bot.core.enums import Side
+    from crypto_bot.simulation.paper_position import PaperPosition
+    from crypto_bot.simulation.pnl import PnLTracker
+
+    # atr_pct=3.0 даёт sigma_tick ~ (3.0% * 0.6) / sqrt(60) ≈ 0.23%, что
+    # упирается в max_sigma_tick=0.01 (1%). Это форсирует предельную
+    # волатильность тика — пробитие SL=1% за 5000 шагов гарантировано
+    # вне зависимости от seed'а. В реале sigma_tick будет ~0.02–0.05%.
+    sim = make_sim(theta=0.001, tick_interval_sec=1.0)
+    entry = 100.0
+    stop = 99.0
+    take = 105.0
+
+    sim.set_anchor("ASSET/USDT", price=entry, atr_pct=3.0, candle_seconds=60)
+
+    tracker = PnLTracker()
+    pos = PaperPosition(
+        symbol="ASSET/USDT", timeframe="1h", side=Side.LONG,
+        size=10.0, entry_price=entry, stop_loss=stop, take_profit=take,
+    )
+    tracker.add_position(pos)
+    assert pos.is_open
+
+    all_prices = []
+    for _ in range(5000):
+        price = sim.tick("ASSET/USDT", dt=1.0)
+        if price is not None:
+            all_prices.append(price)
+            if pos.check_stop_loss(price):
+                tracker.close_position(pos, price, closed_by="stop_loss")
+                break
+
+    assert pos.is_closed, (
+        f"price never hit SL={stop}; min={min(all_prices):.4f} "
+        f"max={max(all_prices):.4f} over {len(all_prices)} ticks"
+    )
+    assert pos.closed_by == "stop_loss"
+    assert pos.pnl_pct is not None and pos.pnl_pct < 0
+    assert "ASSET/USDT" not in tracker.open_symbols()

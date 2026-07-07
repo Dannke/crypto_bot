@@ -52,6 +52,28 @@ def test_pnl_tracker_summary_after_close():
     assert summary.total_pnl_abs == 5.0
 
 
+def test_open_symbol_timeframes():
+    tracker = PnLTracker()
+    assert tracker.open_symbol_timeframes() == {}
+
+    pos1 = PaperPosition(symbol="BTC/USDT", timeframe="1h", side=Side.LONG, size=1.0,
+                         entry_price=100.0, stop_loss=95.0, take_profit=110.0)
+    pos2 = PaperPosition(symbol="BTC/USDT", timeframe="15m", side=Side.LONG, size=1.0,
+                         entry_price=100.0, stop_loss=95.0, take_profit=110.0)
+    pos3 = PaperPosition(symbol="ETH/USDT", timeframe="1h", side=Side.SHORT, size=1.0,
+                         entry_price=100.0, stop_loss=105.0, take_profit=95.0)
+    tracker.add_position(pos1)
+    tracker.add_position(pos2)
+    tracker.add_position(pos3)
+
+    tfs = tracker.open_symbol_timeframes()
+    assert tfs == {"BTC/USDT": {"1h", "15m"}, "ETH/USDT": {"1h"}}
+
+    tracker.close_position(pos1, 105.0)
+    tfs = tracker.open_symbol_timeframes()
+    assert tfs == {"BTC/USDT": {"15m"}, "ETH/USDT": {"1h"}}
+
+
 def test_fee_calculator():
     fee = FeeCalculator().calculate(amount=1.0, price=100.0, is_maker=False)
     assert fee.fee_abs > 0

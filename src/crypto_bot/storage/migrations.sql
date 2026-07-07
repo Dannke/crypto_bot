@@ -56,6 +56,7 @@ CREATE TABLE IF NOT EXISTS decisions (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
     ts_ms         INTEGER NOT NULL,
     symbol        TEXT    NOT NULL,
+    timeframe     TEXT    NOT NULL DEFAULT '',
     accepted      INTEGER NOT NULL CHECK (accepted IN (0,1)),
     reject_reason TEXT        CHECK (reject_reason IS NULL
                                     OR reject_reason IN (
@@ -138,5 +139,5 @@ CREATE INDEX IF NOT EXISTS idx_equity_ts ON equity (ts_ms);
 CREATE INDEX IF NOT EXISTS idx_positions_symbol_tf_status ON positions (symbol, timeframe, status);
 
 -- ---- schema version ---------------------------------------------------------
-INSERT INTO schema_meta (key, value) VALUES ('schema_version', '2')
+INSERT INTO schema_meta (key, value) VALUES ('schema_version', '3')
     ON CONFLICT(key) DO NOTHING;

@@ -55,6 +55,17 @@ def is_timeframe_allowed(tf: str) -> bool:
     return tf in ALLOWED_TIMEFRAMES
 
 
+def is_bar_closed(candle_open_ts_ms: int, timeframe: str, as_of_ms: int) -> bool:
+    """Bar is closed if its full period has elapsed by ``as_of_ms``.
+
+    Used as the single source of truth for bar-boundary checks in both
+    live (``as_of_ms = now``) and backtest (``as_of_ms = simulated time``)
+    paths so they cannot diverge in behaviour.
+    """
+    period_ms = timeframe_to_seconds(timeframe) * 1000
+    return candle_open_ts_ms + period_ms <= as_of_ms
+
+
 # =========================================================================== #
 # Universe / symbols
 # =========================================================================== #

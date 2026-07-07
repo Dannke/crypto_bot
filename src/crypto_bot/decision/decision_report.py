@@ -8,7 +8,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
-from ..core.enums import RejectReason, Signal, Side
+from ..core.enums import RejectReason, Side, Signal
 from ..core.types import FeatureSet
 from ..filters.base import FilterResult
 from ..scoring.score_engine import ScoreResult
@@ -84,6 +84,12 @@ class DecisionReport:
         }
 
     @classmethod
+    def _ts_from_features(cls, features: FeatureSet | None) -> datetime:
+        if features and features.candle_timestamp_ms > 0:
+            return datetime.fromtimestamp(features.candle_timestamp_ms / 1000, tz=UTC)
+        return datetime.now(tz=UTC)
+
+    @classmethod
     def from_score_result(
         cls,
         score_result: ScoreResult,
@@ -94,9 +100,10 @@ class DecisionReport:
         filter_results: list[FilterResult] | None = None,
         strategy_name: str = "",
         explanation: str = "",
-    ) -> "DecisionReport":
+    ) -> DecisionReport:
         """Create a DecisionReport from a ScoreResult and additional context."""
         return cls(
+            timestamp=cls._ts_from_features(features),
             symbol=score_result.symbol,
             signal=signal,
             side=side,
@@ -148,9 +155,10 @@ class DecisionReport:
         filter_result: FilterResult | None = None,
         features: FeatureSet | None = None,
         explanation: str = "",
-    ) -> "DecisionReport":
+    ) -> DecisionReport:
         """Create a DecisionReport for a rejected candidate."""
         return cls(
+            timestamp=cls._ts_from_features(features),
             symbol=symbol,
             signal=Signal.HOLD,
             side=None,

@@ -229,6 +229,7 @@ class FeatureBuilder:
             bb_mid=bb_mid,
             bb_lower=bb_lower,
             bb_position=m.bb_pos,
+            candle_timestamp_ms=last.timestamp,
             liquidity_score=liq,
             spread_pct=ctx.spread_pct,
             correlation_btc=correlation_btc,

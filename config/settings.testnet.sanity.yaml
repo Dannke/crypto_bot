@@ -29,7 +29,7 @@ exchange:
   rate_limit_ms: 200
 
 timeframes:
-  primary: ["1m", "15m", "1h", "4h"]
+  primary: ["5m", "15m", "1h", "4h"]
   candles_per_tf: 400
 
 strategy:

@@ -15,8 +15,8 @@ dependency surface to the stdlib.
 """
 from __future__ import annotations
 
-import sqlite3
 import asyncio
+import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
@@ -85,6 +85,8 @@ class Database:
 
         # v2: add timeframe + closed_by columns to existing databases
         self._migrate_v2()
+        # v3: add timeframe column to decisions
+        self._migrate_v3()
 
     def _migrate_v2(self) -> None:
         existing = self._conn.execute(
@@ -104,6 +106,22 @@ class Database:
             self._conn.commit()
         except sqlite3.OperationalError:
             pass  # columns already exist
+
+    def _migrate_v3(self) -> None:
+        existing = self._conn.execute(
+            "SELECT value FROM schema_meta WHERE key='schema_version'"
+        ).fetchone()
+        if existing and int(existing["value"]) >= 3:
+            return
+        try:
+            self._conn.executescript("""
+                ALTER TABLE decisions ADD COLUMN timeframe TEXT NOT NULL DEFAULT '';
+                INSERT INTO schema_meta (key, value) VALUES ('schema_version', '3')
+                    ON CONFLICT(key) DO UPDATE SET value='3';
+            """)
+            self._conn.commit()
+        except sqlite3.OperationalError:
+            pass
 
     def schema_version(self) -> str:
         row = self._conn.execute(
@@ -289,11 +307,12 @@ class DecisionRepository:
         with self._db.transaction() as conn:
             cur = conn.execute(
                 """INSERT INTO decisions
-                   (ts_ms, symbol, accepted, reject_reason, detail, score, signal)
-                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                   (ts_ms, symbol, timeframe, accepted, reject_reason, detail, score, signal)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
-                    ts_ms or _now_ms(),
+                    ts_ms if ts_ms is not None else int(decision.timestamp.timestamp() * 1000),
                     decision.symbol,
+                    decision.timeframe or "",
                     1 if decision.accepted else 0,
                     _reject_value(decision.reason),
                     decision.detail,
@@ -336,32 +355,45 @@ class PositionRepository:
             ).fetchone()
         return row is not None
 
-    def list_open(self, timeframe: str | None = None) -> list[Position]:
+    def _list_open_sql(self, symbol: str | None = None, timeframe: str | None = None) -> tuple[str, list]:
+        clauses = ["status='open'"]
+        params: list = []
+        if symbol:
+            clauses.append("symbol=?")
+            params.append(symbol)
         if timeframe:
-            rows = self._db.conn.execute(
-                """SELECT id, symbol, timeframe, side, size, entry_price, stop, take,
-                          opened_at_ms, status, closed_at_ms, exit_price, pnl_pct, closed_by
-                     FROM positions WHERE status='open' AND timeframe=?
-                    ORDER BY opened_at_ms""",
-                (timeframe,),
-            ).fetchall()
-        else:
-            rows = self._db.conn.execute(
-                """SELECT id, symbol, timeframe, side, size, entry_price, stop, take,
-                          opened_at_ms, status, closed_at_ms, exit_price, pnl_pct, closed_by
-                     FROM positions WHERE status='open'
-                    ORDER BY opened_at_ms"""
-            ).fetchall()
+            clauses.append("timeframe=?")
+            params.append(timeframe)
+        sql = (
+            "SELECT id, symbol, timeframe, side, size, entry_price, stop, take,"
+            " opened_at_ms, status, closed_at_ms, exit_price, pnl_pct, closed_by"
+            f" FROM positions WHERE {' AND '.join(clauses)} ORDER BY opened_at_ms"
+        )
+        return sql, params
+
+    def list_open(self, symbol: str | None = None, timeframe: str | None = None) -> list[Position]:
+        sql, params = self._list_open_sql(symbol, timeframe)
+        rows = self._db.conn.execute(sql, params).fetchall()
         return [self._row_to_position(r) for r in rows]
 
-    def list_closed(self, limit: int = 100) -> list[Position]:
-        rows = self._db.conn.execute(
-            """SELECT id, symbol, timeframe, side, size, entry_price, stop, take,
-                      opened_at_ms, status, closed_at_ms, exit_price, pnl_pct, closed_by
-                 FROM positions WHERE status='closed'
-                ORDER BY closed_at_ms DESC LIMIT ?""",
-            (limit,),
-        ).fetchall()
+    def _list_closed_sql(self, symbol: str | None = None, limit: int = 100) -> tuple[str, list]:
+        clauses: list[str] = []
+        params: list = []
+        if symbol:
+            clauses.append("symbol=?")
+            params.append(symbol)
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        sql = (
+            "SELECT id, symbol, timeframe, side, size, entry_price, stop, take,"
+            " opened_at_ms, status, closed_at_ms, exit_price, pnl_pct, closed_by"
+            f" FROM positions {where} ORDER BY closed_at_ms DESC LIMIT ?"
+        )
+        params.append(limit)
+        return sql, params
+
+    def list_closed(self, symbol: str | None = None, limit: int = 100) -> list[Position]:
+        sql, params = self._list_closed_sql(symbol, limit)
+        rows = self._db.conn.execute(sql, params).fetchall()
         return [self._row_to_position(r) for r in rows]
 
     def insert(
@@ -452,6 +484,19 @@ class PositionRepository:
                 )
                 count += 1
             return count
+
+    def delete_for_symbol(self, symbol: str) -> int:
+        """Delete all position records for a given symbol. Returns count deleted."""
+        with self._db.transaction() as conn:
+            conn.execute(
+                "DELETE FROM trades WHERE position_id IN (SELECT id FROM positions WHERE symbol=?)",
+                (symbol,),
+            )
+            cur = conn.execute(
+                "DELETE FROM positions WHERE symbol=?",
+                (symbol,),
+            )
+            return cur.rowcount
 
     def delete_all(self) -> int:
         """Delete all position records. Returns count deleted."""

@@ -11,8 +11,12 @@ import asyncio
 import math
 import random
 import time
-from collections.abc import Awaitable, Callable, Iterable
+from collections.abc import Awaitable, Callable, Iterable, Mapping
 from dataclasses import dataclass, field
+
+from ..core.logging_setup import get_logger
+
+_log = get_logger(__name__)
 
 
 @dataclass
@@ -118,7 +122,7 @@ class PriceSimulator:
         return state.simulated_price if state else None
 
     def get_current_prices(
-        self, symbol_timeframes: dict[str, Iterable[str]]
+        self, symbol_timeframes: Mapping[str, Iterable[str]]
     ) -> dict[str, dict[str, float]]:
         result: dict[str, dict[str, float]] = {}
         for symbol, timeframes in symbol_timeframes.items():
@@ -142,13 +146,19 @@ class PriceSimulator:
     ) -> None:
         while True:
             for symbol in symbols_provider():
-                price = self.tick(symbol)
-                if price is not None and on_tick is not None:
-                    result = on_tick(symbol, price)
+                try:
+                    price = self.tick(symbol)
+                    if price is not None and on_tick is not None:
+                        result = on_tick(symbol, price)
+                        if asyncio.iscoroutine(result):
+                            await result
+                except Exception as exc:
+                    _log.error("price_sim: tick failed for %s: %s", symbol, exc, exc_info=True)
+            if on_cycle_end is not None:
+                try:
+                    result = on_cycle_end()
                     if asyncio.iscoroutine(result):
                         await result
-            if on_cycle_end is not None:
-                result = on_cycle_end()
-                if asyncio.iscoroutine(result):
-                    await result
+                except Exception as exc:
+                    _log.error("price_sim: on_cycle_end crashed: %s", exc, exc_info=True)
             await asyncio.sleep(self._config.tick_interval_sec)

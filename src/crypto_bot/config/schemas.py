@@ -28,9 +28,9 @@ class RuntimeConfig(StrictConfigModel):
 
 
 class ExchangeConfig(StrictConfigModel):
-    name: str = "binance"
+    name: str = "bybit"
     sandbox: bool = True
-    rate_limit_ms: int = Field(default=1200, ge=200)
+    rate_limit_ms: int = Field(default=75, ge=0)
 
 
 class TimeframesConfig(StrictConfigModel):

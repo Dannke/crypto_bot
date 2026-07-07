@@ -71,10 +71,9 @@ async def run_orchestrator(config: Config) -> None:
 
     async def _sim_check_positions() -> None:
         """Called from background tick every ~1s under lock."""
-        open_syms = executor.tracker.open_symbols()
-        if not open_syms:
+        sym_tfs = executor.tracker.open_symbol_timeframes()
+        if not sym_tfs:
             return
-        sym_tfs = {s: settings.timeframes.primary for s in open_syms}
         async with executor_lock:
             current_prices = price_sim.get_current_prices(sym_tfs)
             if current_prices:
@@ -96,8 +95,10 @@ async def run_orchestrator(config: Config) -> None:
                 logger.info("Starting scan cycle at %s", datetime.now(tz=UTC).isoformat())
 
                 try:
+                    t0 = time.time()
                     logger.info("--- scan cycle starts ---")
                     symbols = await resolve_symbols(client, config, feed.exchange_available)
+                    t1 = time.time()
                     if not symbols:
                         logger.warning("Universe is empty; skipping cycle")
                         continue
@@ -116,9 +117,11 @@ async def run_orchestrator(config: Config) -> None:
                         sym: market_context_from_ticker(tickers.get(sym, {}))
                         for sym in symbols
                     }
+                    t2 = time.time()
 
                     feeds = await feed.fetch_many(symbols)
                     symbol_candles = {f.symbol: f.by_timeframe for f in feeds}
+                    t3 = time.time()
 
                     features_by_symbol = build_features_batch(
                         symbol_candles,
@@ -127,8 +130,15 @@ async def run_orchestrator(config: Config) -> None:
                         quote=quote,
                         trigger_tf=trigger_tf,
                     )
+                    t4 = time.time()
 
                     result = pipeline.process(features_by_symbol, strategy, per_timeframe=per_timeframe_mode)
+                    t5 = time.time()
+
+                    logger.info(
+                        "timings: resolve=%.1f tickers=%.1f feed=%.1f features=%.1f pipeline=%.1f",
+                        t1 - t0, t2 - t1, t3 - t2, t4 - t3, t5 - t4,
+                    )
                     stats: dict[str, Any] = result["stats"]
                     logger.info(
                         "--- cycle: processed=%d selected=%d rejected=%d avg_score=%.1f",
@@ -140,6 +150,26 @@ async def run_orchestrator(config: Config) -> None:
                     reject_reasons = stats.get("reject_reasons") or {}
                     if reject_reasons:
                         logger.info("--- reject reasons: %s", reject_reasons)
+
+                    # ---- update price simulator anchors BEFORE opening positions ----
+                    if is_paper:
+                        for sym in symbols:
+                            if tickers and sym in tickers:
+                                last = tickers[sym].get("last", 0.0)
+                                if last > 0:
+                                    fs_dict = features_by_symbol.get(sym, {})
+                                    fs = fs_dict.get(trigger_tf) if fs_dict else None
+                                    atr_pct = fs.atr_pct if fs is not None else None
+                                    price_sim.set_anchor(sym, price=last, atr_pct=atr_pct,
+                                                         candle_seconds=timeframe_to_seconds(trigger_tf))
+                        # fallback: символы без тикера — из последней свечи
+                        for sf in feeds:
+                            if sf.symbol in price_sim.tracked_symbols():
+                                continue
+                            for candles in sf.by_timeframe.values():
+                                if candles:
+                                    price_sim.set_anchor(sf.symbol, price=candles[-1].close)
+                                    break
 
                     # ---- handle selected signals (under lock) ----
                     async with executor_lock:
@@ -176,26 +206,6 @@ async def run_orchestrator(config: Config) -> None:
 
                         for report in result["rejected"]:
                             executor.handle_rejected(_normalize_rejected(report))
-
-                    # ---- update price simulator anchors from tickers + features ----
-                    if is_paper:
-                        for sym in symbols:
-                            if tickers and sym in tickers:
-                                last = tickers[sym].get("last", 0.0)
-                                if last > 0:
-                                    fs_dict = features_by_symbol.get(sym, {})
-                                    fs = fs_dict.get(trigger_tf) if fs_dict else None
-                                    atr_pct = fs.atr_pct if fs is not None else None
-                                    price_sim.set_anchor(sym, price=last, atr_pct=atr_pct,
-                                                         candle_seconds=timeframe_to_seconds(trigger_tf))
-                        # fallback: символы без тикера — из последней свечи
-                        for sf in feeds:
-                            if sf.symbol in price_sim.tracked_symbols():
-                                continue
-                            for candles in sf.by_timeframe.values():
-                                if candles:
-                                    price_sim.set_anchor(sf.symbol, price=candles[-1].close)
-                                    break
 
                     # ---- start background tick loop after first anchor ----
                     if is_paper and sim_task is None and price_sim.tracked_symbols():

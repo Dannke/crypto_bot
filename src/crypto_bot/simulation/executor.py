@@ -10,7 +10,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from ..config.env import Config
-from ..core.enums import Mode, OrderType, RejectReason, Side, Signal, TradeStatus
+from ..core.enums import Mode, OrderType, RejectReason, Signal, TradeStatus
 from ..core.logging_setup import get_logger
 from ..core.types import DecisionRecord
 from ..decision.decision_report import DecisionReport
@@ -51,9 +51,9 @@ class SignalExecutor:
         )
         self._fees = FeeCalculator()
 
-    def _restore_tracker(self) -> PnLTracker:
+    def _restore_tracker(self, symbol: str | None = None) -> PnLTracker:
         """Restore PnLTracker from DB on restart (open + closed positions)."""
-        closed = self._repos.positions.list_closed(limit=10000)
+        closed = self._repos.positions.list_closed(symbol=symbol, limit=10000)
         realized_pnl = sum(
             (p.pnl_pct or 0.0) / 100.0 * (p.entry_price * p.size)
             for p in closed if p.pnl_pct is not None
@@ -65,7 +65,7 @@ class SignalExecutor:
         tracker = PnLTracker(initial_equity=initial, current_equity=equity, peak_equity=peak)
 
         # Restore open positions so SL/TP checking works after restart
-        open_positions = self._repos.positions.list_open()
+        open_positions = self._repos.positions.list_open(symbol=symbol)
         for p in open_positions:
             pp = PaperPosition(
                 symbol=p.symbol,
@@ -95,13 +95,16 @@ class SignalExecutor:
     def handle_selected(self, report: DecisionReport) -> ExecutionResult:
         """Process an accepted decision: journal + optional paper position."""
         self._persist_decision(report, accepted=True)
+        tf: str = str(report.features.get("timeframe", ""))
         self._repos.signals.insert(
             symbol=report.symbol,
             signal=report.signal,
             confidence=report.confidence,
             side=report.side,
             score=report.total_score,
+            timeframe=tf,
             reason=report.explanation[:500] if report.explanation else "",
+            ts_ms=int(report.timestamp.timestamp() * 1000),
         )
 
         mode = self._config.mode
@@ -126,9 +129,11 @@ class SignalExecutor:
     def _persist_decision(self, report: DecisionReport, *, accepted: bool) -> None:
         reason = report.reject_reason or RejectReason.LOW_SCORE
         detail = report.explanation or (report.rejected_by or "")
+        tf: str = str(report.features.get("timeframe", ""))
         record = DecisionRecord(
             timestamp=report.timestamp,
             symbol=report.symbol,
+            timeframe=tf,
             accepted=accepted,
             reason=None if accepted else reason,
             detail=detail[:1000],
@@ -141,7 +146,7 @@ class SignalExecutor:
         if report.side is None:
             return ExecutionResult(handled=False, message="missing side")
 
-        tf = report.features.get("timeframe", "")
+        tf: str = str(report.features.get("timeframe", ""))
         if self._repos.positions.open_exists(report.symbol, timeframe=tf):
             return ExecutionResult(
                 handled=False,
@@ -188,7 +193,7 @@ class SignalExecutor:
             stop=levels.stop_loss,
             take=levels.take_profit,
             mode=Mode.PAPER,
-            opened_at_ms=int(datetime.now(tz=UTC).timestamp() * 1000),
+            opened_at_ms=int(report.timestamp.timestamp() * 1000),
             status=TradeStatus.OPEN,
         )
         self._repos.trades.insert(
@@ -282,6 +287,121 @@ class SignalExecutor:
                     "paper: %s closed by %s %s %s pnl=%.2f",
                     paper_pos.symbol, closed_by, paper_pos.timeframe,
                     paper_pos.side.value, pnl,
+                )
+
+        return stats
+
+    def check_positions_range(
+        self,
+        symbol: str,
+        timeframe: str,
+        low: float,
+        high: float,
+        *,
+        open_price: float | None = None,
+        conflict_resolution: str = "pessimistic",
+        bar_timestamp_ms: int | None = None,
+    ) -> dict[str, Any]:
+        """Check open positions against an OHLC bar's ``[low, high]`` range.
+
+        This is the backtest-safe counterpart of ``check_positions``: it
+        evaluates whether the stop-loss and/or take-profit of each open
+        position lies *inside* the bar's full price range, not just at its
+        close.
+
+        Intrabar conflict resolution (both SL and TP inside the same bar):
+
+        * ``"pessimistic"`` (default) — SL wins.  Conservative, never overstates
+          results.
+        * ``"open_proximity"`` — whichever level is closer to the bar's
+          ``open_price`` triggers first.
+
+        Args:
+            symbol: The trading pair.
+            timeframe: The bar's timeframe.
+            low: Bar's low price.
+            high: Bar's high price.
+            open_price: Bar's open (needed for ``open_proximity``).
+            conflict_resolution: ``"pessimistic"`` or ``"open_proximity"``.
+            bar_timestamp_ms: Bar's timestamp (ms epoch) used as closed_at_ms in DB.
+
+        Returns:
+            Dict with counts/pnl of positions closed on this bar.
+        """
+        stats: dict[str, Any] = {
+            "closed_by_sl": 0,
+            "closed_by_tp": 0,
+            "closed_by_sl_pnl": 0.0,
+            "closed_by_tp_pnl": 0.0,
+        }
+
+        for paper_pos in list(self._tracker.positions):
+            if not paper_pos.is_open:
+                continue
+            if paper_pos.symbol != symbol or paper_pos.timeframe != timeframe:
+                continue
+
+            in_range_sl = low <= paper_pos.stop_loss <= high
+            in_range_tp = low <= paper_pos.take_profit <= high
+
+            if not in_range_sl and not in_range_tp:
+                continue
+
+            # Resolve conflicts when both levels are inside the bar
+            if in_range_sl and in_range_tp:
+                if conflict_resolution == "open_proximity" and open_price is not None:
+                    dist_sl = abs(paper_pos.stop_loss - open_price)
+                    dist_tp = abs(paper_pos.take_profit - open_price)
+                    if dist_tp < dist_sl:
+                        in_range_sl = False  # TP closer to open → TP triggers first
+                    else:
+                        in_range_tp = False  # SL closer or equal → SL wins
+                else:
+                    # pessimistic: SL wins
+                    in_range_tp = False
+
+            # Close the position
+            triggered = False
+            if in_range_sl:
+                exit_price = paper_pos.stop_loss
+                closed_by = "stop_loss"
+                triggered = True
+            elif in_range_tp:
+                exit_price = paper_pos.take_profit
+                closed_by = "take_profit"
+                triggered = True
+            else:
+                continue
+
+            if triggered:
+                self._tracker.close_position(paper_pos, exit_price, closed_by=closed_by)
+
+                # Persist to DB
+                open_positions = self._repos.positions.list_open()
+                for db_pos in open_positions:
+                    if (db_pos.symbol == symbol and db_pos.timeframe == timeframe
+                            and db_pos.side == paper_pos.side):
+                        self._repos.positions.close(
+                            position_id=db_pos.id,
+                            exit_price=exit_price,
+                            pnl_pct=paper_pos.pnl_pct or 0.0,
+                            closed_by=closed_by,
+                            closed_at_ms=bar_timestamp_ms,
+                        )
+                        break
+
+                pnl = paper_pos.pnl_abs or 0.0
+                if closed_by == "stop_loss":
+                    stats["closed_by_sl"] += 1
+                    stats["closed_by_sl_pnl"] += pnl
+                else:
+                    stats["closed_by_tp"] += 1
+                    stats["closed_by_tp_pnl"] += pnl
+
+                logger.info(
+                    "paper: %s closed by %s %s %s (intrabar range [%.4f, %.4f]) pnl=%.2f",
+                    symbol, closed_by, timeframe, paper_pos.side.value,
+                    low, high, pnl,
                 )
 
         return stats

@@ -210,6 +210,14 @@ class MarketDataClient(_BaseClient):
             self._ex.fetch_ohlcv,
             symbol, timeframe, since, limit,
         )
+        if not hasattr(self, '_limit_logged'):
+            self._limit_logged = True
+            headers = self._ex.last_response_headers or {}
+            _log.info(
+                "bybit limit headers — X-Bapi-Limit: %s  X-Bapi-Limit-Status: %s",
+                headers.get("X-Bapi-Limit"),
+                headers.get("X-Bapi-Limit-Status"),
+            )
         return cast(list[list[Any]], rows or [])
 
     async def fetch_ticker(self, symbol: str) -> dict[str, Any]:

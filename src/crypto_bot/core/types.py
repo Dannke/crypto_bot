@@ -109,6 +109,9 @@ class FeatureSet:
     close: float = 0.0
     volume: float = 0.0
 
+    # Candle timestamp of the most recent bar (ms epoch)
+    candle_timestamp_ms: int = 0
+
     # Additional metadata
     extras: dict[str, float] = field(default_factory=dict)
 
@@ -190,5 +193,6 @@ class DecisionRecord:
     accepted: bool
     reason: RejectReason | None   # None when accepted
     detail: str
+    timeframe: str = ""
     score: float | None = None
     signal: Signal | None = None
