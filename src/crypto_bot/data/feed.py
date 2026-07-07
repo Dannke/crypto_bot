@@ -24,8 +24,8 @@ from ..core import policy
 from ..core.exceptions import DataFeedError
 from ..core.logging_setup import get_logger
 from ..core.types import Candle
+from ..storage.db import CandleRepository, Database
 from .exchange import MarketDataClient
-from ..storage.db import Database, CandleRepository
 
 _log = get_logger("data.feed")
 
@@ -238,6 +238,9 @@ class Feed:
         self._db = db
         self._candle_repo = CandleRepository(db) if db else None
         self._exchange_available = True
+        # Per-(symbol, tf) failure tracking — one bad pair must not poison
+        # the entire universe.
+        self._failed_api_pairs: set[tuple[str, str]] = set()
         # In-memory cache: (symbol, tf) -> list[Candle] — avoids re-reading
         # the full candle window from DB on every cycle.
         self._cache: dict[tuple[str, str], list[Candle]] = {}
@@ -267,9 +270,10 @@ class Feed:
                     cached = await self._candle_repo.fetch_async(symbol, tf, limit=self._limit)
                     _log.info("feed: db %s %s = %d candles", symbol, tf, len(cached))
             
-            # Try fetching new candles from API (skip if exchange is known down)
+            # Try fetching new candles from API (skip only if this specific
+            # (symbol, tf) pair has previously failed — others keep trying).
             fetched_new: list[Candle] = []
-            if self._exchange_available:
+            if (symbol, tf) not in self._failed_api_pairs:
                 try:
                     if latest_ts is not None:
                         # Chunked catch-up: fetch in batches until we've caught up to present.
@@ -298,9 +302,12 @@ class Feed:
                     else:
                         raw = await self._client.fetch_ohlcv(symbol, tf, limit=self._limit)
                         fetched_new = _sort_dedup([_row_to_candle(r) for r in raw])
+                    # Successful API call — allow retry on next cycle if this
+                    # pair was previously marked as failed.
+                    self._failed_api_pairs.discard((symbol, tf))
                 except Exception as exc:
                     _log.warning("feed: api fail %s %s: %s", symbol, tf, exc)
-                    self._exchange_available = False
+                    self._failed_api_pairs.add((symbol, tf))
             
             all_candles = (cached or []) + fetched_new
             all_candles = _sort_dedup(all_candles)
@@ -310,6 +317,10 @@ class Feed:
             
             # Update in-memory cache
             self._cache[cache_key] = all_candles
+            
+            if not all_candles:
+                _log.warning("feed: %s %s = 0 candles — skipping", symbol, tf)
+                return tf, []
             
             if fetched_new and self._candle_repo:
                 await self._candle_repo.upsert_many_async(symbol, tf, fetched_new)
@@ -324,7 +335,8 @@ class Feed:
             return tf, all_candles
 
         results = await asyncio.gather(*[_one(tf) for tf in self._timeframes])
-        return SymbolFeed(symbol=symbol, by_timeframe=dict(results))
+        non_empty = {tf: candles for tf, candles in results if candles}
+        return SymbolFeed(symbol=symbol, by_timeframe=non_empty)
 
     async def fetch_many(self, symbols: Iterable[str]) -> list[SymbolFeed]:
         """Fetch many symbols concurrently; isolate per-symbol failures.

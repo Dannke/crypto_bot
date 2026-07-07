@@ -27,7 +27,6 @@ from ..core.exceptions import (
     ExchangeError,
     LiveTradingForbiddenError,
 )
-import asyncio
 from ..core.logging_setup import get_logger
 
 _log = get_logger("data.exchange")
@@ -204,13 +203,14 @@ class MarketDataClient(_BaseClient):
     async def fetch_ohlcv(
         self, symbol: str, timeframe: str, limit: int = 200, since: int | None = None
     ) -> list[list[Any]]:
-        """Fetch OHLCV data.  Fails fast — caller (feed) falls back to DB cache."""
+        """Fetch OHLCV data with retry on transient errors."""
         limit = max(1, min(int(limit), policy.MAX_CANDLES_LOOKBACK))
-        try:
-            rows = await self._ex.fetch_ohlcv(symbol, timeframe, since, limit)
-            return cast(list[list[Any]], rows or [])
-        except Exception as exc:
-            raise DataFeedError(f"fetch_ohlcv failed for {symbol} {timeframe}: {exc}") from exc
+        rows = await self._with_retry(
+            f"fetch_ohlcv({symbol}, {timeframe})",
+            self._ex.fetch_ohlcv,
+            symbol, timeframe, since, limit,
+        )
+        return cast(list[list[Any]], rows or [])
 
     async def fetch_ticker(self, symbol: str) -> dict[str, Any]:
         return cast(dict[str, Any], await self._ex.fetch_ticker(symbol))
@@ -227,7 +227,7 @@ class MarketDataClient(_BaseClient):
             return cast(dict[str, Any], await asyncio.wait_for(
                 self._ex.fetch_tickers(symbols), timeout=15,
             ))
-        except asyncio.TimeoutError:
+        except TimeoutError:
             _log.warning("fetch_tickers timed out after 15s (will use DB fallback)")
             return {}
         except Exception as exc:
