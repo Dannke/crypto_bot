@@ -32,6 +32,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 # --------------------------------------------------------------------------- #
 # Константы
@@ -43,8 +44,19 @@ TF_SECONDS = {
     "1d": 86400,
 }
 
-READY_THRESHOLD_DEFAULT = 50
-GETTING_THERE = 20
+READY_THRESHOLD_DEFAULT = 50   # используется только если --min-bars передан явно
+GETTING_THERE = 20              # >= это -> "рано, но не пусто" (при отсутствии TF в таблице ниже)
+
+# Для проверки КОРРЕКТНОСТИ (совпадает ли решение бэктеста с живым ботом на
+# том же баре) не нужна статистическая выборка — нужно всего несколько
+# честных баров, чтобы либо увидеть расхождение, либо получить разумную
+# уверенность в его отсутствии. Пороги ниже — минимально достаточные для
+# старта первой сверки, не "достаточно для расчёта Sharpe".
+TF_MIN_BARS = {
+    "1m": 30, "3m": 30, "5m": 20, "15m": 15, "30m": 10,
+    "1h": 8, "2h": 6, "4h": 5, "6h": 4, "12h": 3, "1d": 3,
+}
+TF_MIN_BARS_FALLBACK = 20
 
 TIMESTAMP_CANDIDATES = ["timestamp", "ts_ms", "ts"]
 TIMEFRAME_CANDIDATES = ["timeframe", "tf"]
@@ -57,10 +69,16 @@ def tf_seconds(tf: str) -> int | None:
     return TF_SECONDS.get((tf or "").strip().lower())
 
 
-def verdict(distinct_bars: int, ready_threshold: int) -> str:
-    if distinct_bars >= ready_threshold:
-        return "ГОТОВО для первой сверки"
-    if distinct_bars >= GETTING_THERE:
+def required_bars_for(timeframe: str, override: int | None) -> int:
+    if override is not None:
+        return override
+    return TF_MIN_BARS.get((timeframe or "").strip().lower(), TF_MIN_BARS_FALLBACK)
+
+
+def verdict(distinct_bars: int, required: int) -> str:
+    if distinct_bars >= required:
+        return f"ГОТОВО для первой сверки (>= {required})"
+    if distinct_bars >= max(3, required // 2):
         return "рано, но не пусто"
     return "слишком рано"
 
@@ -79,15 +97,9 @@ def pick_column(columns: list[str], candidates: list[str]) -> str | None:
 def get_columns(con: sqlite3.Connection, table: str) -> list[str]:
     try:
         cur = con.execute(f"PRAGMA table_info({table})")
-        return [str(row[1]) for row in cur.fetchall()]
+        return [row[1] for row in cur.fetchall()]
     except sqlite3.OperationalError:
         return []
-
-
-def _ensure_str(val: object) -> str:
-    if val is None:
-        return ""
-    return str(val)
 
 
 # --------------------------------------------------------------------------- #
@@ -114,7 +126,7 @@ class DecisionsQueryResult:
     reason_col: str | None = None
     rows: list[SymbolTfRow] = field(default_factory=list)
     reject_reasons: list[tuple[str, str, int]] = field(default_factory=list)
-    accepted: list[dict[str, object]] = field(default_factory=list)
+    accepted: list[dict[str, Any]] = field(default_factory=list)
     error: str | None = None
 
 
@@ -171,8 +183,8 @@ def query_decisions(db_path: Path, accepted_limit: int = 20) -> DecisionsQueryRe
         rows_raw: list[sqlite3.Row] = con.execute(query).fetchall()
         rows = [
             SymbolTfRow(
-                symbol=_ensure_str(r["symbol"]),
-                timeframe=_ensure_str(r["timeframe"] or "?"),
+                symbol=str(r["symbol"]),
+                timeframe=str(r["timeframe"] or "?"),
                 raw_rows=int(r["raw_rows"]),
                 distinct_bars=int(r["distinct_bars"]),
                 accepted_n=int(r["accepted_n"] or 0),
@@ -193,7 +205,7 @@ def query_decisions(db_path: Path, accepted_limit: int = 20) -> DecisionsQueryRe
             """
             reject_raw: list[sqlite3.Row] = con.execute(rq).fetchall()
             result.reject_reasons = [
-                (_ensure_str(row["timeframe"] or "?"), _ensure_str(row["reason"]), int(row["n"]))
+                (str(row["timeframe"] or "?"), str(row["reason"]), int(row["n"]))
                 for row in reject_raw
             ]
 
@@ -262,7 +274,7 @@ def analyze_log(log_path: Path, expected_interval_s: float) -> LogAnalysis:
     if cycle_times:
         result.last_cycle_ts = cycle_times[-1]
 
-    threshold = expected_interval_s * 2.5
+    threshold = expected_interval_s * 2.5  # запас на джиттер / rate-limit
     for prev, cur in zip(cycle_times, cycle_times[1:], strict=False):
         gap = (cur - prev).total_seconds()
         if gap > threshold:
@@ -280,7 +292,7 @@ def analyze_log(log_path: Path, expected_interval_s: float) -> LogAnalysis:
 def build_report(
     db_path: Path,
     log_path: Path,
-    min_bars: int,
+    min_bars_override: int | None,
     loop_interval: float,
 ) -> str:
     now = datetime.now(tz=UTC)
@@ -322,15 +334,27 @@ def build_report(
         for r in rows:
             age_s = (now - datetime.fromtimestamp(r.last_ts_ms / 1000, tz=UTC)).total_seconds()
             age_str = f"{age_s/60:.0f}м" if age_s < 3600 else f"{age_s/3600:.1f}ч"
-            v = verdict(r.distinct_bars, min_bars)
+            required = required_bars_for(r.timeframe, min_bars_override)
+            v = verdict(r.distinct_bars, required)
             stale_flag = ""
             tfs = tf_seconds(r.timeframe)
             if tfs and age_s > tfs * 3:
                 stale_flag = "  !! ПОСЛЕДНИЙ БАР УСТАРЕЛ — проверьте, не встал ли бот"
+
+            bar_math_flag = ""
+            if tfs:
+                elapsed_s = max((r.last_ts_ms - r.first_ts_ms) / 1000.0, 0.0)
+                max_possible_bars = int(elapsed_s // tfs) + 2  # +2 запас на граничные эффекты
+                if r.distinct_bars > max_possible_bars:
+                    bar_math_flag = (
+                        f"  !! distinct_bars ({r.distinct_bars}) БОЛЬШЕ физически возможного "
+                        f"числа закрытий {r.timeframe}-бара за это окно (~{max_possible_bars}) — "
+                        f"ts_ms похоже отражает время ЦИКЛА, а не время закрытия бара"
+                    )
             w(
                 f"{r.symbol:<10} {r.timeframe:<6} {r.raw_rows:>6} {r.distinct_bars:>9} "
                 f"{r.accepted_n:>9} {fmt_ts_ms(r.first_ts_ms):<22} {fmt_ts_ms(r.last_ts_ms):<22} "
-                f"{age_str:>9}  {v}{stale_flag}"
+                f"{age_str:>9}  {v}{stale_flag}{bar_math_flag}"
             )
 
     w("")
@@ -340,10 +364,10 @@ def build_report(
         w("  (нет данных, либо в схеме нет колонки reason/accepted)")
     else:
         cur_tf = None
-        for tf_, reason, n in reasons:
-            if tf_ != cur_tf:
-                w(f"  [{tf_}]")
-                cur_tf = tf_
+        for tf, reason, n in reasons:
+            if tf != cur_tf:
+                w(f"  [{tf}]")
+                cur_tf = tf
             w(f"    {reason:<28} {n}")
 
     w("")
@@ -354,9 +378,9 @@ def build_report(
     else:
         for row in accepted:
             ts_val = row.get("ts")
-            sym_val = _ensure_str(row.get("symbol"))
-            tf_val = _ensure_str(row.get("timeframe"))
-            sig_val = _ensure_str(row.get("signal"))
+            sym_val = str(row.get("symbol", ""))
+            tf_val = str(row.get("timeframe") or "")
+            sig_val = str(row.get("signal") or "")
             score_val = row.get("score")
             score_str = f"{score_val}" if score_val is not None else "None"
             ts_str = str(ts_val) if ts_val is not None else ""
@@ -381,8 +405,8 @@ def build_report(
 
         if log_result.gaps:
             w(f"  Разрывы между циклами длиннее {loop_interval*2.5:.0f}с (ожидался ~{loop_interval:.0f}с):")
-            for prev, cur_, gap in log_result.gaps[-10:]:
-                w(f"    {prev} -> {cur_}   разрыв {gap:.0f}с")
+            for prev, cur, gap in log_result.gaps[-10:]:
+                w(f"    {prev} -> {cur}   разрыв {gap:.0f}с")
         else:
             w("  Разрывов между циклами не обнаружено — цикл идёт стабильно.")
 
@@ -400,13 +424,13 @@ def build_report(
 
     w("")
     w("--- 5. Итог ---")
-    ready = [r for r in rows if r.distinct_bars >= min_bars]
+    ready = [r for r in rows if r.distinct_bars >= required_bars_for(r.timeframe, min_bars_override)]
     if ready:
-        w(f"  Готовы для первой кросс-сверки (distinct_bars >= {min_bars}):")
+        w("  Готовы для первой кросс-сверки (порог зависит от TF, см. секцию 1):")
         for r in ready:
             w(f"    {r.symbol} {r.timeframe}: {r.distinct_bars} баров")
     else:
-        w(f"  Пока ни одна пара (symbol, timeframe) не набрала {min_bars}+ баров.")
+        w("  Пока ни одна пара (symbol, timeframe) не набрала нужный минимум баров.")
 
     w("=" * 78)
     return "\n".join(lines)
@@ -416,7 +440,10 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--db", default="data/crypto_bot.db", help="путь к SQLite БД")
     parser.add_argument("--log", default="logs/crypto_bot.log", help="путь к лог-файлу")
-    parser.add_argument("--min-bars", type=int, default=READY_THRESHOLD_DEFAULT, help="порог distinct_bars для 'готово'")
+    parser.add_argument(
+        "--min-bars", type=int, default=None,
+        help="явный порог 'готово' для ВСЕХ TF одинаково. Без флага — разумные дефолты по каждому TF (5m=20, 1h=8, 4h=5 и т.д.)",
+    )
     parser.add_argument("--loop-interval", type=float, default=60.0, help="ожидаемый loop_interval_seconds из конфига")
     parser.add_argument("--out", default=None, help="куда сохранить отчёт (по умолчанию validation_report_<ts>.txt)")
     args = parser.parse_args()
