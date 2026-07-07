@@ -13,6 +13,7 @@ and stays free of any I/O dependency.
 from __future__ import annotations
 
 import asyncio
+import time
 from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Any
@@ -28,6 +29,10 @@ from ..storage.db import CandleRepository, Database
 from .exchange import MarketDataClient
 
 _log = get_logger("data.feed")
+
+# How long to wait before retrying API for a (symbol, tf) pair that failed.
+# Prevents tight retry loops without permanently disabling the pair.
+FAILED_PAIR_COOLDOWN_SECONDS: float = 120.0
 
 
 @dataclass(slots=True)
@@ -238,9 +243,10 @@ class Feed:
         self._db = db
         self._candle_repo = CandleRepository(db) if db else None
         self._exchange_available = True
-        # Per-(symbol, tf) failure tracking — one bad pair must not poison
-        # the entire universe.
-        self._failed_api_pairs: set[tuple[str, str]] = set()
+        # Per-(symbol, tf) failure cooldown — maps (symbol, tf) to the
+        # timestamp when it failed.  Pairs are retried after a cooldown
+        # period so one bad request doesn't permanently disable a pair.
+        self._failed_api_pairs: dict[tuple[str, str], float] = {}
         # In-memory cache: (symbol, tf) -> list[Candle] — avoids re-reading
         # the full candle window from DB on every cycle.
         self._cache: dict[tuple[str, str], list[Candle]] = {}
@@ -270,10 +276,13 @@ class Feed:
                     cached = await self._candle_repo.fetch_async(symbol, tf, limit=self._limit)
                     _log.info("feed: db %s %s = %d candles", symbol, tf, len(cached))
             
-            # Try fetching new candles from API (skip only if this specific
-            # (symbol, tf) pair has previously failed — others keep trying).
+            # Try fetching new candles from API.
+            # If this (symbol, tf) pair failed recently, skip API and go
+            # straight to DB cache until the cooldown expires.
             fetched_new: list[Candle] = []
-            if (symbol, tf) not in self._failed_api_pairs:
+            failed_at = self._failed_api_pairs.get((symbol, tf))
+            should_try_api = failed_at is None or (time.time() - failed_at) > FAILED_PAIR_COOLDOWN_SECONDS
+            if should_try_api:
                 try:
                     if latest_ts is not None:
                         # Chunked catch-up: fetch in batches until we've caught up to present.
@@ -302,12 +311,11 @@ class Feed:
                     else:
                         raw = await self._client.fetch_ohlcv(symbol, tf, limit=self._limit)
                         fetched_new = _sort_dedup([_row_to_candle(r) for r in raw])
-                    # Successful API call — allow retry on next cycle if this
-                    # pair was previously marked as failed.
-                    self._failed_api_pairs.discard((symbol, tf))
+                    # Success — clear any previous failure timestamp
+                    self._failed_api_pairs.pop((symbol, tf), None)
                 except Exception as exc:
                     _log.warning("feed: api fail %s %s: %s", symbol, tf, exc)
-                    self._failed_api_pairs.add((symbol, tf))
+                    self._failed_api_pairs[(symbol, tf)] = time.time()
             
             all_candles = (cached or []) + fetched_new
             all_candles = _sort_dedup(all_candles)
