@@ -128,22 +128,6 @@ class SignalResult:
     reason: str
 
 
-@dataclass(slots=True)
-class ScoredCandidate:
-    """A ranked, risk-annotated trade idea ready for the risk manager."""
-
-    symbol: str
-    signal: Signal
-    side: Side | None
-    score: float                  # 0..100
-    confidence: float             # 0..1
-    entry: float
-    stop: float
-    take: float
-    risk_pct: float               # stop distance as % of entry
-    features: dict[str, float] = field(default_factory=dict)
-
-
 # --------------------------------------------------------------------------- #
 # Position & journaling
 # --------------------------------------------------------------------------- #

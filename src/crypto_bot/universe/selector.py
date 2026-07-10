@@ -125,10 +125,7 @@ class UniverseSelector:
             return False
 
         # Check leveraged token exclusion
-        if self._config.exclude_leveraged and self._is_leveraged(base):
-            return False
-
-        return True
+        return not (self._config.exclude_leveraged and self._is_leveraged(base))
 
     def _is_stablecoin(self, base: str) -> bool:
         """Check if base is a stablecoin."""

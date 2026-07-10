@@ -295,6 +295,11 @@ class SignalRepository:
             )
             return _lastrowid(cur)
 
+    async def insert_async(self, *args, **kwargs) -> int:
+        return await asyncio.get_event_loop().run_in_executor(
+            None, lambda: self.insert(*args, **kwargs)
+        )
+
 
 # --------------------------------------------------------------------------- #
 # Decision repository
@@ -322,17 +327,43 @@ class DecisionRepository:
             )
             return _lastrowid(cur)
 
-    def count_recent_for_symbol(self, symbol: str, within_minutes: int) -> int:
+    def count_recent_for_symbol(
+        self,
+        symbol: str,
+        within_minutes: int,
+        *,
+        reference_ts_ms: int | None = None,
+    ) -> int:
         """Number of decisions (any kind) for a symbol within the window.
 
         Used by the cooldown filter to detect recent activity.
+        Uses wall-clock by default; accepts ``reference_ts_ms`` for backtest mode.
+
+        Args:
+            symbol: The trading pair.
+            within_minutes: Lookback window in minutes.
+            reference_ts_ms: Optional reference timestamp (epoch ms) instead of
+                ``_now_ms()``.  Pass the current bar's timestamp when running
+                in backtest so the cooldown is evaluated against historical time,
+                not wall-clock time.
         """
-        cutoff = _now_ms() - within_minutes * 60 * 1000
+        now_ms = reference_ts_ms if reference_ts_ms is not None else _now_ms()
+        cutoff = now_ms - within_minutes * 60 * 1000
         row = self._db.conn.execute(
             "SELECT COUNT(*) AS c FROM decisions WHERE symbol=? AND ts_ms >= ?",
             (symbol, cutoff),
         ).fetchone()
         return int(row["c"]) if row else 0
+
+    async def insert_async(self, *args, **kwargs) -> int:
+        return await asyncio.get_event_loop().run_in_executor(
+            None, lambda: self.insert(*args, **kwargs)
+        )
+
+    async def count_recent_for_symbol_async(self, *args, **kwargs) -> int:
+        return await asyncio.get_event_loop().run_in_executor(
+            None, lambda: self.count_recent_for_symbol(*args, **kwargs)
+        )
 
 
 # --------------------------------------------------------------------------- #
@@ -505,6 +536,44 @@ class PositionRepository:
             cur = conn.execute("DELETE FROM positions")
             return cur.rowcount
 
+    async def open_exists_async(self, *args, **kwargs) -> bool:
+        return await asyncio.get_event_loop().run_in_executor(
+            None, lambda: self.open_exists(*args, **kwargs)
+        )
+
+    async def list_open_async(self, *args, **kwargs) -> list[Position]:
+        return await asyncio.get_event_loop().run_in_executor(
+            None, lambda: self.list_open(*args, **kwargs)
+        )
+
+    async def list_closed_async(self, *args, **kwargs) -> list[Position]:
+        return await asyncio.get_event_loop().run_in_executor(
+            None, lambda: self.list_closed(*args, **kwargs)
+        )
+
+    async def insert_async(self, *args, **kwargs) -> int:
+        return await asyncio.get_event_loop().run_in_executor(
+            None, lambda: self.insert(*args, **kwargs)
+        )
+
+    async def close_async(self, *args, **kwargs) -> None:
+        return await asyncio.get_event_loop().run_in_executor(
+            None, lambda: self.close(*args, **kwargs)
+        )
+
+    async def close_all_open_async(self, *args, **kwargs) -> int:
+        return await asyncio.get_event_loop().run_in_executor(
+            None, lambda: self.close_all_open(*args, **kwargs)
+        )
+
+    async def delete_for_symbol_async(self, *args, **kwargs) -> int:
+        return await asyncio.get_event_loop().run_in_executor(
+            None, lambda: self.delete_for_symbol(*args, **kwargs)
+        )
+
+    async def delete_all_async(self) -> int:
+        return await asyncio.get_event_loop().run_in_executor(None, self.delete_all)
+
     def _row_to_position(self, r: sqlite3.Row) -> Position:
         opened = datetime.fromtimestamp(r["opened_at_ms"] / 1000.0, tz=UTC)
         closed = (
@@ -595,6 +664,21 @@ class TradeRepository:
         ).fetchall()
         return [self._row_to_trade(r) for r in rows]
 
+    async def insert_async(self, *args, **kwargs) -> int:
+        return await asyncio.get_event_loop().run_in_executor(
+            None, lambda: self.insert(*args, **kwargs)
+        )
+
+    async def list_for_position_async(self, *args, **kwargs) -> list[Trade]:
+        return await asyncio.get_event_loop().run_in_executor(
+            None, lambda: self.list_for_position(*args, **kwargs)
+        )
+
+    async def latest_for_symbol_async(self, *args, **kwargs) -> list[Trade]:
+        return await asyncio.get_event_loop().run_in_executor(
+            None, lambda: self.latest_for_symbol(*args, **kwargs)
+        )
+
     @staticmethod
     def _row_to_trade(r: sqlite3.Row) -> Trade:
         return Trade(
@@ -645,6 +729,16 @@ class EquityRepository:
             return None
         return float(row["equity"]), (
             float(row["drawdown_pct"]) if row["drawdown_pct"] is not None else 0.0
+        )
+
+    async def insert_async(self, *args, **kwargs) -> int:
+        return await asyncio.get_event_loop().run_in_executor(
+            None, lambda: self.insert(*args, **kwargs)
+        )
+
+    async def latest_async(self, mode: Mode) -> tuple[float, float] | None:
+        return await asyncio.get_event_loop().run_in_executor(
+            None, lambda: self.latest(mode)
         )
 
 

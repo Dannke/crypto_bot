@@ -13,8 +13,7 @@ from typing import Any
 from ..core.types import FeatureSet
 from ..decision.decision_report import DecisionReport
 from ..decision.explanation import ExplanationGenerator
-from ..future.fusion import ClassicalOnlyFusion, FusionEngine, FusedDecision
-from ..ml.predictor import Predictor
+from ..future.fusion import ClassicalOnlyFusion, FusedDecision, FusionEngine
 from ..pipeline.candidate_builder import CandidateBuilder
 from ..pipeline.candidate_selector import CandidateSelector, SelectionConfig
 from ..strategy.base import Strategy
@@ -37,13 +36,11 @@ class DecisionPipeline:
         builder: CandidateBuilder | None = None,
         selector: CandidateSelector | None = None,
         fusion_engine: FusionEngine | None = None,
-        ml_predictor: Predictor | None = None,
         explanation_generator: Any = None,
     ) -> None:
         self._builder = builder or CandidateBuilder()
         self._selector = selector or CandidateSelector()
         self._fusion_engine = fusion_engine or ClassicalOnlyFusion()
-        self._ml_predictor = ml_predictor or Predictor()
         self._explanation_generator = explanation_generator or ExplanationGenerator()
 
     def process(
@@ -53,6 +50,7 @@ class DecisionPipeline:
         selection_config: SelectionConfig | None = None,
         *,
         per_timeframe: bool = False,
+        as_of_ms: int | None = None,
     ) -> dict[str, Any]:
         """Process feature sets and generate trading decisions.
 
@@ -62,13 +60,17 @@ class DecisionPipeline:
             selection_config: Optional selection configuration.
             per_timeframe: If True, evaluate each timeframe as an independent
                 signal source (requires a strategy like ``SingleTfEngine``).
+            as_of_ms: Optional bar timestamp (epoch ms) forwarded to filters.
+                ``None`` = live mode (wall-clock).
 
         Returns:
             Dictionary with processing results including selected candidates,
             rejected candidates, and statistics.
         """
         if per_timeframe:
-            return self._process_per_timeframe(features_by_symbol, strategy, selection_config)
+            return self._process_per_timeframe(
+                features_by_symbol, strategy, selection_config, as_of_ms=as_of_ms,
+            )
 
         # Update selector config if provided
         if selection_config:
@@ -82,6 +84,7 @@ class DecisionPipeline:
         accepted_reports, rejected_reports = self._builder.build_batch(
             features_by_symbol,
             strategy,
+            as_of_ms=as_of_ms,
         )
 
         # Select best candidates from those that cleared the builder stage.
@@ -133,6 +136,8 @@ class DecisionPipeline:
         features_by_symbol: dict[str, dict[str, FeatureSet]],
         strategy: Strategy,
         selection_config: SelectionConfig | None = None,
+        *,
+        as_of_ms: int | None = None,
     ) -> dict[str, Any]:
         """Evaluate each timeframe independently.
 
@@ -145,6 +150,7 @@ class DecisionPipeline:
         accepted_reports, rejected_reports = self._builder.build_batch_per_tf(
             features_by_symbol,
             strategy,
+            as_of_ms=as_of_ms,
         )
 
         selected = self._selector.select(accepted_reports)
@@ -188,6 +194,8 @@ class DecisionPipeline:
         symbol: str,
         features_by_tf: dict[str, FeatureSet],
         strategy: Strategy,
+        *,
+        as_of_ms: int | None = None,
     ) -> DecisionReport | None:
         """Process a single symbol and generate a decision.
 
@@ -195,6 +203,7 @@ class DecisionPipeline:
             symbol: Symbol to process.
             features_by_tf: Features by timeframe.
             strategy: Strategy instance for evaluation.
+            as_of_ms: Optional bar timestamp, forwarded to filters.
 
         Returns:
             DecisionReport if accepted, None if rejected.
@@ -203,11 +212,11 @@ class DecisionPipeline:
             symbol,
             features_by_tf,
             strategy,
+            as_of_ms=as_of_ms,
         )
 
         if accepted_report:
-            # Apply fusion
-            fused = self._apply_fusion(accepted_report)
+            self._apply_fusion(accepted_report)
             explanation = self._explanation_generator.generate(accepted_report)
             return replace(accepted_report, explanation=explanation)
 
@@ -222,23 +231,11 @@ class DecisionPipeline:
         Returns:
             FusedDecision with combined signal.
         """
-        # Get ML prediction (stub for now)
-        ml_prediction = None
-        if self._ml_predictor.is_enabled:
-            # Extract features for ML
-            features = report.features
-            ml_prediction = self._ml_predictor.predict(features)
-
-        # Apply fusion
         fused = self._fusion_engine.fuse(
             classical_signal=report.signal,
             classical_side=report.side,
             classical_confidence=report.confidence,
-            ml_prediction=ml_prediction,
-            ml_weight=0.0,  # Currently classical only
         )
-
-        # Update symbol in fused decision
         return FusedDecision(
             symbol=report.symbol,
             signal=fused.signal,
@@ -254,14 +251,6 @@ class DecisionPipeline:
             ml_weight=fused.ml_weight,
         )
 
-    def enable_ml(self) -> None:
-        """Enable ML predictions in the pipeline."""
-        self._ml_predictor.enable()
-
-    def disable_ml(self) -> None:
-        """Disable ML predictions in the pipeline."""
-        self._ml_predictor.disable()
-
     @property
     def builder(self) -> CandidateBuilder:
         """Get the candidate builder."""
@@ -276,8 +265,3 @@ class DecisionPipeline:
     def fusion_engine(self) -> FusionEngine:
         """Get the fusion engine."""
         return self._fusion_engine
-
-    @property
-    def ml_predictor(self) -> Predictor:
-        """Get the ML predictor."""
-        return self._ml_predictor

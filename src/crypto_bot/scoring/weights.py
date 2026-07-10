@@ -36,7 +36,7 @@ class ScoringWeights:
             + self.risk
         )
 
-    def normalized(self) -> "ScoringWeights":
+    def normalized(self) -> ScoringWeights:
         """Return a new ScoringWeights with values normalized to sum to 1.0."""
         total = self.total()
         if total == 0:

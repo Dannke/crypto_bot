@@ -5,6 +5,7 @@ gains/losses, win rate, and performance metrics.
 """
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
@@ -51,9 +52,16 @@ class PnLTracker:
         self._update_equity()
 
     def close_position(self, position: PaperPosition, exit_price: float, *,
-                       closed_by: str | None = None) -> None:
-        """Close a position and update P&L."""
-        position.close(exit_price, closed_by=closed_by)
+                       closed_by: str | None = None, exit_fee_abs: float = 0.0) -> None:
+        """Close a position and update P&L.
+
+        Args:
+            position: The position to close.
+            exit_price: Price at which the position is closed.
+            closed_by: Reason for closing.
+            exit_fee_abs: Exit commission, subtracted from gross P&L.
+        """
+        position.close(exit_price, closed_by=closed_by, exit_fee_abs=exit_fee_abs)
         self._update_equity()
         self.equity_history.append((datetime.now(tz=UTC), self.current_equity))
 
@@ -105,11 +113,19 @@ class PnLTracker:
         # Calculate max profit
         max_profit_pct = (self.peak_equity - self.initial_equity) / self.initial_equity * 100.0
 
-        # Calculate Sharpe ratio (simplified)
+        # Calculate Sharpe ratio from equity history returns
         sharpe_ratio = 0.0
-        if len(self.equity_history) > 1 and total_pnl_pct != 0:
-            # Simplified Sharpe: return / max_drawdown (not statistically rigorous but useful)
-            sharpe_ratio = total_pnl_pct / max_drawdown_pct if max_drawdown_pct > 0 else 0.0
+        if len(self.equity_history) > 2:
+            equities = [e for _, e in self.equity_history]
+            returns = [(equities[i] - equities[i-1]) / equities[i-1]
+                       for i in range(1, len(equities))]
+            returns = [r for r in returns if abs(r) < 0.5]  # filter outliers
+            if len(returns) > 1:
+                mean_ret = sum(returns) / len(returns)
+                var_ret = sum((r - mean_ret) ** 2 for r in returns) / (len(returns) - 1)
+                if var_ret > 0:
+                    std_ret = math.sqrt(var_ret)
+                    sharpe_ratio = (mean_ret / std_ret) * math.sqrt(365)
 
         return PnLSummary(
             total_trades=total_trades,

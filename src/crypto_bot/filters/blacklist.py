@@ -5,8 +5,10 @@ permanently (e.g., delisted coins) or temporarily (e.g., under investigation).
 """
 from __future__ import annotations
 
-from .base import Filter, FilterOutcome, FilterResult
+from typing import Any
+
 from ..core.types import FeatureSet
+from .base import Filter, FilterOutcome, FilterResult
 
 
 class BlacklistFilter(Filter):
@@ -24,7 +26,7 @@ class BlacklistFilter(Filter):
         super().__init__("blacklist")
         self._blacklist = blacklist or set()
 
-    def evaluate(self, features: FeatureSet) -> FilterResult:
+    def evaluate(self, features: FeatureSet, **kwargs: Any) -> FilterResult:
         symbol = features.symbol.upper()
 
         if symbol in self._blacklist:

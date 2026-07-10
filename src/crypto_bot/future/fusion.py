@@ -10,7 +10,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from enum import StrEnum
 
-from ..core.enums import Signal, Side
+from ..core.enums import Side, Signal
 from ..ml.base import MLPrediction
 
 

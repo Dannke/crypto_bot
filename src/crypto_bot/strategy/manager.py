@@ -132,28 +132,6 @@ class StrategyManager:
             raise RuntimeError("No default strategy set")
         return strategy.evaluate(symbol, features_by_tf)
 
-    def score_with_default(
-        self,
-        features: Any,
-        signal_result: Any,
-    ) -> Any:
-        """Score using the default strategy.
-
-        Args:
-            features: Feature set.
-            signal_result: Signal result from evaluation.
-
-        Returns:
-            Scored candidate from the strategy.
-
-        Raises:
-            RuntimeError: If no default strategy is set.
-        """
-        strategy = self.get_default_strategy()
-        if strategy is None:
-            raise RuntimeError("No default strategy set")
-        return strategy.score(features, signal_result)
-
     @property
     def registry(self) -> StrategyRegistry:
         """Get the strategy registry."""

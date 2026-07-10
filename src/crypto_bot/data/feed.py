@@ -265,6 +265,8 @@ class Feed:
             cache_key = (symbol, tf)
             cached = self._cache.get(cache_key)
             latest_ts: int | None = None
+            now_ms = int(time.time() * 1000)
+            period_ms = policy.timeframe_to_seconds(tf) * 1000
             
             if cached is not None:
                 # Use in-memory cache from the previous cycle
@@ -296,6 +298,7 @@ class Feed:
                             )
                             batch = _sort_dedup([_row_to_candle(r) for r in raw])
                             batch = [c for c in batch if c.timestamp > latest_ts]
+                            batch = [c for c in batch if c.timestamp + period_ms <= now_ms]
                             if not batch:
                                 break
                             fetched_new.extend(batch)
@@ -311,6 +314,7 @@ class Feed:
                     else:
                         raw = await self._client.fetch_ohlcv(symbol, tf, limit=self._limit)
                         fetched_new = _sort_dedup([_row_to_candle(r) for r in raw])
+                        fetched_new = [c for c in fetched_new if c.timestamp + period_ms <= now_ms]
                     # Success — clear any previous failure timestamp
                     self._failed_api_pairs.pop((symbol, tf), None)
                 except Exception as exc:

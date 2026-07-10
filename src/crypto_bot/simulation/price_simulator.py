@@ -12,7 +12,7 @@ import math
 import random
 import time
 from collections.abc import Awaitable, Callable, Iterable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 from ..core.logging_setup import get_logger
 
@@ -38,7 +38,7 @@ class _SymbolState:
     simulated_price: float
     sigma_tick: float
     tick_size: float | None = None
-    last_update_ts: float = field(default_factory=time.time)
+    last_update_ts: float = 0.0  # epoch seconds, 0 = not yet initialised
 
 
 class PriceSimulator:
@@ -70,6 +70,7 @@ class PriceSimulator:
         atr_pct: float | None = None,
         candle_seconds: float | None = None,
         tick_size: float | None = None,
+        reference_ts: float | None = None,
     ) -> None:
         if price <= 0:
             raise ValueError(f"price must be positive, got {price}")
@@ -80,6 +81,7 @@ class PriceSimulator:
             if atr_pct is not None
             else cfg.min_sigma_tick
         )
+        now_ts = reference_ts if reference_ts is not None else time.time()
         state = self._states.get(symbol)
         if state is None:
             self._states[symbol] = _SymbolState(
@@ -87,23 +89,28 @@ class PriceSimulator:
                 simulated_price=price,
                 sigma_tick=sigma_tick,
                 tick_size=tick_size,
+                last_update_ts=now_ts,
             )
         else:
             state.anchor_price = price
             state.sigma_tick = sigma_tick
+            state.last_update_ts = now_ts
             if tick_size is not None:
                 state.tick_size = tick_size
 
-    def tick(self, symbol: str, dt: float | None = None) -> float | None:
+    def tick(self, symbol: str, dt: float | None = None, reference_ts: float | None = None) -> float | None:
         state = self._states.get(symbol)
         if state is None:
             return None
         cfg = self._config
-        now = time.time()
+        now_ts = reference_ts if reference_ts is not None else time.time()
         if dt is None:
-            elapsed = max(now - state.last_update_ts, 0.0)
-            dt = elapsed / cfg.tick_interval_sec if elapsed > 0 else 1.0
-        state.last_update_ts = now
+            if state.last_update_ts > 0:
+                elapsed = max(now_ts - state.last_update_ts, 0.0)
+                dt = elapsed / cfg.tick_interval_sec if elapsed > 0 else 1.0
+            else:
+                dt = 1.0
+        state.last_update_ts = now_ts
         dt = min(dt, cfg.max_dt_ticks)
         log_anchor = math.log(state.anchor_price)
         log_price = math.log(state.simulated_price)

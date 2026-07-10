@@ -5,8 +5,6 @@ order of score, optionally limiting to the top N candidates.
 """
 from __future__ import annotations
 
-from typing import Any
-
 from ..core.types import FeatureSet
 from .score_engine import ScoreResult
 

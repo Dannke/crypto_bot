@@ -29,6 +29,7 @@ class PaperPosition:
     pnl_pct: float | None = None
     pnl_abs: float | None = None
     closed_by: str | None = None  # stop_loss | take_profit | manual | signal
+    entry_fee_abs: float = 0.0  # entry commission, subtracted from P&L on close
 
     @property
     def is_open(self) -> bool:
@@ -59,8 +60,15 @@ class PaperPosition:
         return (self.entry_price - current_price) * self.size
 
     def close(self, exit_price: float, exit_time: datetime | None = None, *,
-              closed_by: str | None = None) -> None:
-        """Close the position at the given price."""
+              closed_by: str | None = None, exit_fee_abs: float = 0.0) -> None:
+        """Close the position at the given price.
+
+        Args:
+            exit_price: Exit price.
+            exit_time: Optional exit timestamp.
+            closed_by: Reason for closing (stop_loss, take_profit, manual, signal).
+            exit_fee_abs: Exit commission in quote currency, subtracted from P&L.
+        """
         if not self.is_open:
             raise ValueError("Position is already closed")
 
@@ -69,12 +77,15 @@ class PaperPosition:
         self.status = TradeStatus.CLOSED
         self.closed_by = closed_by
 
-        # Calculate realized P&L
+        # Calculate gross P&L
         if self.side == Side.LONG:
-            self.pnl_abs = (self.exit_price - self.entry_price) * self.size
+            gross_pnl = (self.exit_price - self.entry_price) * self.size
         else:  # SHORT
-            self.pnl_abs = (self.entry_price - self.exit_price) * self.size
+            gross_pnl = (self.entry_price - self.exit_price) * self.size
 
+        # Deduct both entry and exit fees
+        total_fees = self.entry_fee_abs + exit_fee_abs
+        self.pnl_abs = gross_pnl - total_fees
         self.pnl_pct = (self.pnl_abs / (self.entry_price * self.size)) * 100.0
 
     def check_stop_loss(self, current_price: float) -> bool:

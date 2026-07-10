@@ -331,8 +331,8 @@ def backtest(ctx, symbol, timeframe, start, end, conflict, config):
 
     bt = Backtester(
         config_obj,
-        symbol=symbol.upper(),
-        timeframe=timeframe,
+        symbols=[symbol.upper()],
+        timeframes=[timeframe],
         start_ms=start_ms,
         end_ms=end_ms,
         conflict_resolution=conflict,
@@ -403,8 +403,6 @@ def summary(ctx, config):
     losses = [p for p in closed if p.pnl_pct is not None and p.pnl_pct <= 0]
     by_sl = [p for p in closed if p.closed_by == "stop_loss"]
     by_tp = [p for p in closed if p.closed_by == "take_profit"]
-
-    total_pnl = sum(p.pnl_pct or 0.0 for p in closed)
 
     click.echo(f"\n{'='*60}")
     click.echo(f"  P&L SUMMARY — {total} closed positions")

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import StrEnum
+from typing import Any
 
 from ..core.types import FeatureSet
 
@@ -46,11 +47,17 @@ class Filter:
     def name(self) -> str:
         return self._name
 
-    def evaluate(self, features: FeatureSet) -> FilterResult:
+    def evaluate(
+        self,
+        features: FeatureSet,
+        **kwargs: Any,
+    ) -> FilterResult:
         """Evaluate a candidate and return PASS or REJECT with a reason.
 
         Args:
             features: The feature set for the symbol/timeframe being evaluated.
+            **kwargs: Optional extra context (e.g. ``reference_ts`` for backtest-safe
+                time-dependent filters like ``CooldownFilter``).
 
         Returns:
             FilterResult with outcome and optional reason/detail.

@@ -95,3 +95,27 @@ def test_cooldown_update_last_trade_time():
     )
     result = filter_instance.evaluate(features)
     assert not result.passed
+
+
+def test_cooldown_backtest_safe_with_reference_ts():
+    """Backtest mode: passing ``reference_ts`` makes cooldown relative to
+    historical time instead of wall-clock."""
+    filter_instance = CooldownFilter(
+        cooldown_minutes=60,
+        last_trade_time={"BTC/USDT": datetime(2024, 1, 1, 0, 0, tzinfo=UTC)},
+    )
+    features = FeatureSet(
+        symbol="BTC/USDT", timeframe="15m", trend_score=0.8, momentum_score=0.7,
+        volatility_score=0.6, volume_score=0.9, adx=25.0, rsi=55.0, atr_pct=1.5,
+        ema_fast=100.0, ema_mid=99.0, ema_slow=98.0,
+    )
+    # reference_ts = 30 minutes after last_trade — still in cooldown
+    result = filter_instance.evaluate(
+        features, reference_ts=datetime(2024, 1, 1, 0, 30, tzinfo=UTC),
+    )
+    assert not result.passed
+    # reference_ts = 90 minutes after last_trade — cooldown expired
+    result = filter_instance.evaluate(
+        features, reference_ts=datetime(2024, 1, 1, 1, 30, tzinfo=UTC),
+    )
+    assert result.passed

@@ -62,14 +62,6 @@ class StrategyRegistry:
             return None
         return strategy_class(*args, **kwargs)
 
-    def list_strategies(self) -> list[str]:
-        """List all registered strategy names.
-
-        Returns:
-            List of strategy names.
-        """
-        return list(self._strategies.keys())
-
     def is_registered(self, name: str) -> bool:
         """Check if a strategy is registered.
 
@@ -80,25 +72,3 @@ class StrategyRegistry:
             True if the strategy is registered, False otherwise.
         """
         return name in self._strategies
-
-    def unregister(self, name: str) -> None:
-        """Unregister a strategy by name.
-
-        Args:
-            name: Name of the strategy to unregister.
-
-        Raises:
-            KeyError: If the strategy is not registered.
-        """
-        if name not in self._strategies:
-            raise KeyError(f"Strategy '{name}' is not registered")
-        del self._strategies[name]
-
-
-# Global registry instance
-_global_registry = StrategyRegistry()
-
-
-def get_global_registry() -> StrategyRegistry:
-    """Get the global strategy registry instance."""
-    return _global_registry

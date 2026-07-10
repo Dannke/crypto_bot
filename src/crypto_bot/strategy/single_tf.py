@@ -7,12 +7,9 @@ is responsible for aggregating or selecting among them.
 """
 from __future__ import annotations
 
-from typing import Any
-
 from ..core.enums import Side, Signal
-from ..core.types import FeatureSet, ScoredCandidate, SignalResult
+from ..core.types import FeatureSet, SignalResult
 from .base import Strategy, StrategyContext
-from .scorer import Scorer
 
 
 def _direction_from_features(f: FeatureSet, ctx: StrategyContext) -> Side | None:
@@ -41,7 +38,6 @@ class SingleTfEngine(Strategy):
     def __init__(self, ctx: StrategyContext, timeframes: list[str]) -> None:
         self._ctx = ctx
         self._timeframes = timeframes
-        self._scorer = Scorer(ctx, ctx.max_stop_distance_pct)
 
     def evaluate(self, symbol: str, features_by_tf: dict[str, FeatureSet]) -> SignalResult:
         tf = next(iter(features_by_tf))
@@ -66,6 +62,3 @@ class SingleTfEngine(Strategy):
             by_timeframe={tf: Signal.HOLD},
             reason=f"{tf}: no directional bias",
         )
-
-    def score(self, features: FeatureSet, signal_result: Any) -> ScoredCandidate | None:
-        return self._scorer.score_candidate(features, signal_result)

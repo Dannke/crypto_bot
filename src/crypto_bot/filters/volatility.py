@@ -6,8 +6,10 @@ volatility within a tradable range.
 """
 from __future__ import annotations
 
-from .base import Filter, FilterOutcome, FilterResult
+from typing import Any
+
 from ..core.types import FeatureSet
+from .base import Filter, FilterOutcome, FilterResult
 
 
 class VolatilityFilter(Filter):
@@ -26,7 +28,7 @@ class VolatilityFilter(Filter):
         self._min_atr_pct = min_atr_pct
         self._max_atr_pct = max_atr_pct
 
-    def evaluate(self, features: FeatureSet) -> FilterResult:
+    def evaluate(self, features: FeatureSet, **kwargs: Any) -> FilterResult:
         atr = features.atr_pct
 
         if atr < self._min_atr_pct:

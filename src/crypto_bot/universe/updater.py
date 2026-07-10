@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from .selector import UniverseConfig, UniverseSelector
+from .selector import UniverseSelector
 
 
 @dataclass(frozen=True, slots=True)

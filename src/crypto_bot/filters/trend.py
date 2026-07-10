@@ -5,8 +5,10 @@ avoiding choppy/ranging markets where trend-following strategies fail.
 """
 from __future__ import annotations
 
-from .base import Filter, FilterOutcome, FilterResult
+from typing import Any
+
 from ..core.types import FeatureSet
+from .base import Filter, FilterOutcome, FilterResult
 
 
 class TrendFilter(Filter):
@@ -24,7 +26,7 @@ class TrendFilter(Filter):
         super().__init__("trend")
         self._min_adx = min_adx
 
-    def evaluate(self, features: FeatureSet) -> FilterResult:
+    def evaluate(self, features: FeatureSet, **kwargs: Any) -> FilterResult:
         # Check ADX strength
         if features.adx < self._min_adx:
             return FilterResult(

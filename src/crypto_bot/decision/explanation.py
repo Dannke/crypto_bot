@@ -5,7 +5,6 @@ that traders can understand.
 """
 from __future__ import annotations
 
-from ..core.enums import Signal, Side
 from .decision_report import DecisionReport
 
 

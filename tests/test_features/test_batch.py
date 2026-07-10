@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from crypto_bot.core.types import Candle
-from crypto_bot.features.batch import build_features_batch, return_correlation
+from crypto_bot.features.batch import aligned_correlation, build_features_batch
 from crypto_bot.features.builder import FeatureBuilder, FeatureBuilderParams
 from crypto_bot.features.context import SymbolMarketContext
 
@@ -21,9 +21,22 @@ def _candles(n: int = 250, start: float = 100.0) -> list[Candle]:
     ]
 
 
-def test_return_correlation_perfect_for_identical_series():
-    closes = [100 + i for i in range(40)]
-    assert return_correlation(closes, closes) > 0.99
+def test_aligned_correlation_perfect_for_identical_series():
+    closes = {i: 100.0 + i for i in range(40)}
+    assert aligned_correlation(closes, closes) > 0.99
+
+
+def test_aligned_correlation_zero_for_misaligned_timestamps():
+    a = {i: 100.0 + i for i in range(40)}
+    b = {i + 100: 200.0 + i for i in range(40)}  # no overlapping timestamps
+    assert aligned_correlation(a, b) == 0.0
+
+
+def test_aligned_correlation_partial_overlap():
+    a = {i: 100.0 + i for i in range(50)}
+    b = {i: 200.0 + i * 2 for i in range(50)}  # same timestamps, different prices
+    corr = aligned_correlation(a, b, window=20)
+    assert -1.0 <= corr <= 1.0
 
 
 def test_build_features_batch_skips_insufficient_data():

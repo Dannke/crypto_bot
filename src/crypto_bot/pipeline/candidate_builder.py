@@ -5,15 +5,14 @@ feature sets into scored trade candidates ready for selection.
 """
 from __future__ import annotations
 
-from typing import Any
+from datetime import UTC, datetime
 
 from ..core.enums import RejectReason
-from ..core.types import FeatureSet, SignalResult
+from ..core.types import FeatureSet
 from ..decision.decision_report import DecisionReport
 from ..filters.base import Filter, FilterResult
-from ..scoring.score_engine import ScoreEngine, ScoreResult
+from ..scoring.score_engine import ScoreEngine
 from ..strategy.base import Strategy
-
 
 _FILTER_REJECT: dict[str, RejectReason] = {
     "insufficient_liquidity": RejectReason.INSUFFICIENT_LIQUIDITY,
@@ -83,6 +82,8 @@ class CandidateBuilder:
         symbol: str,
         features_by_tf: dict[str, FeatureSet],
         strategy: Strategy,
+        *,
+        as_of_ms: int | None = None,
     ) -> tuple[DecisionReport | None, list[DecisionReport]]:
         """Build a candidate from feature sets.
 
@@ -90,6 +91,8 @@ class CandidateBuilder:
             symbol: Symbol being evaluated.
             features_by_tf: Features by timeframe.
             strategy: Strategy instance for evaluation.
+            as_of_ms: Optional bar timestamp (epoch ms) for time-dependent
+                filters (cooldown, etc.).  ``None`` = live mode (wall-clock).
 
         Returns:
             Tuple of (accepted_decision, rejected_reports).
@@ -101,20 +104,31 @@ class CandidateBuilder:
             return None, []
 
         features = features_by_tf[primary_tf]
+        reference_ts = (
+            datetime.fromtimestamp(as_of_ms / 1000, tz=UTC)
+            if as_of_ms is not None
+            else None
+        )
 
-        # Apply filters
+        # Apply filters — collect all reject reasons, don't stop at first
         filter_results = []
+        rejected = []
+        kwargs = {} if reference_ts is None else {"reference_ts": reference_ts}
         for filter_instance in self._filters:
-            result = filter_instance.evaluate(features)
+            result = filter_instance.evaluate(features, **kwargs)
             filter_results.append(result)
             if not result.passed:
-                report = DecisionReport.rejected_report(
-                    symbol=symbol,
-                    reject_reason=_reject_from_filter(result),
-                    filter_result=result,
-                    features=features,
+                rejected.append(
+                    DecisionReport.rejected_report(
+                        symbol=symbol,
+                        reject_reason=_reject_from_filter(result),
+                        filter_result=result,
+                        features=features,
+                    )
                 )
-                return None, [report]
+
+        if rejected:
+            return None, rejected
 
         # Score the candidate
         score_result = self._score_engine.compute(features)
@@ -148,12 +162,15 @@ class CandidateBuilder:
         self,
         features_by_symbol: dict[str, dict[str, FeatureSet]],
         strategy: Strategy,
+        *,
+        as_of_ms: int | None = None,
     ) -> tuple[list[DecisionReport], list[DecisionReport]]:
         """Build candidates for multiple symbols.
 
         Args:
             features_by_symbol: Dictionary of symbol -> features by timeframe.
             strategy: Strategy instance for evaluation.
+            as_of_ms: Optional bar timestamp, forwarded to ``build()``.
 
         Returns:
             Tuple of (accepted_reports, rejected_reports).
@@ -162,7 +179,9 @@ class CandidateBuilder:
         rejected = []
 
         for symbol, features_by_tf in features_by_symbol.items():
-            accepted_report, rejected_reports = self.build(symbol, features_by_tf, strategy)
+            accepted_report, rejected_reports = self.build(
+                symbol, features_by_tf, strategy, as_of_ms=as_of_ms,
+            )
             if accepted_report:
                 accepted.append(accepted_report)
             rejected.extend(rejected_reports)
@@ -173,6 +192,8 @@ class CandidateBuilder:
         self,
         features_by_symbol: dict[str, dict[str, FeatureSet]],
         strategy: Strategy,
+        *,
+        as_of_ms: int | None = None,
     ) -> tuple[list[DecisionReport], list[DecisionReport]]:
         """Build one candidate per (symbol, timeframe) pair.
 
@@ -184,6 +205,7 @@ class CandidateBuilder:
         Args:
             features_by_symbol: Dictionary of symbol -> features by timeframe.
             strategy: Strategy instance (e.g. ``SingleTfEngine``).
+            as_of_ms: Optional bar timestamp, forwarded to ``build()``.
 
         Returns:
             Tuple of (accepted_reports, rejected_reports).
@@ -193,7 +215,9 @@ class CandidateBuilder:
         for symbol, features_by_tf in features_by_symbol.items():
             for tf, features in features_by_tf.items():
                 single_tf = {tf: features}
-                accepted_report, rejected_reports = self.build(symbol, single_tf, strategy)
+                accepted_report, rejected_reports = self.build(
+                    symbol, single_tf, strategy, as_of_ms=as_of_ms,
+                )
                 if accepted_report:
                     accepted.append(accepted_report)
                 rejected.extend(rejected_reports)

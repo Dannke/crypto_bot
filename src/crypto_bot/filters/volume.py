@@ -5,8 +5,10 @@ ensures we only trade symbols with meaningful trading activity.
 """
 from __future__ import annotations
 
-from .base import Filter, FilterOutcome, FilterResult
+from typing import Any
+
 from ..core.types import FeatureSet
+from .base import Filter, FilterOutcome, FilterResult
 
 
 class VolumeFilter(Filter):
@@ -25,7 +27,7 @@ class VolumeFilter(Filter):
         self._min_volume_score = min_volume_score
         self._min_absolute_volume = min_absolute_volume
 
-    def evaluate(self, features: FeatureSet) -> FilterResult:
+    def evaluate(self, features: FeatureSet, **kwargs: Any) -> FilterResult:
         # Check volume score (relative to MA)
         if features.volume_score < self._min_volume_score:
             return FilterResult(

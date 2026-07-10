@@ -6,8 +6,10 @@ without significant market impact.
 """
 from __future__ import annotations
 
-from .base import Filter, FilterOutcome, FilterResult
+from typing import Any
+
 from ..core.types import FeatureSet
+from .base import Filter, FilterOutcome, FilterResult
 
 
 class LiquidityFilter(Filter):
@@ -26,7 +28,7 @@ class LiquidityFilter(Filter):
         self._min_quote_volume = min_quote_volume_24h
         self._min_liquidity_score = min_liquidity_score
 
-    def evaluate(self, features: FeatureSet) -> FilterResult:
+    def evaluate(self, features: FeatureSet, **kwargs: Any) -> FilterResult:
         # Check liquidity score from features
         if features.liquidity_score < self._min_liquidity_score:
             return FilterResult(

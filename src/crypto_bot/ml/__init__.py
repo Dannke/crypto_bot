@@ -4,7 +4,7 @@ Provides abstract interfaces and stubs for ML models, enabling future
 integration of neural networks and other ML techniques without modifying
 the existing decision pipeline.
 """
-from .base import MLPrediction, MLModel
+from .base import MLModel, MLPrediction
 from .feature_pipeline import FeaturePipeline
 from .model_registry import ModelRegistry
 from .predictor import Predictor

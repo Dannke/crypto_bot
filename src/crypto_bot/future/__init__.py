@@ -4,7 +4,7 @@ Provides the fusion engine interface that will combine classical strategy
 signals with ML predictions in future stages. Currently uses only classical
 signals but the architecture is ready for ML integration.
 """
-from .fusion import FusionEngine, FusedDecision
+from .fusion import FusedDecision, FusionEngine
 
 __all__ = [
     "FusionEngine",

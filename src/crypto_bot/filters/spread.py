@@ -5,8 +5,10 @@ significantly impact profitability, especially for frequent trading.
 """
 from __future__ import annotations
 
-from .base import Filter, FilterOutcome, FilterResult
+from typing import Any
+
 from ..core.types import FeatureSet
+from .base import Filter, FilterOutcome, FilterResult
 
 
 class SpreadFilter(Filter):
@@ -23,7 +25,7 @@ class SpreadFilter(Filter):
         super().__init__("spread")
         self._max_spread_pct = max_spread_pct
 
-    def evaluate(self, features: FeatureSet) -> FilterResult:
+    def evaluate(self, features: FeatureSet, **kwargs: Any) -> FilterResult:
         if features.spread_pct > self._max_spread_pct:
             return FilterResult(
                 filter_name=self.name,

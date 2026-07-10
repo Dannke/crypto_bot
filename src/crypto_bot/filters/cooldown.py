@@ -7,9 +7,10 @@ re-entries on the same position.
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
-from .base import Filter, FilterOutcome, FilterResult
 from ..core.types import FeatureSet
+from .base import Filter, FilterOutcome, FilterResult
 
 
 class CooldownFilter(Filter):
@@ -28,19 +29,22 @@ class CooldownFilter(Filter):
         self._cooldown_minutes = cooldown_minutes
         self._last_trade_time = last_trade_time or {}
 
-    def evaluate(self, features: FeatureSet) -> FilterResult:
+    def evaluate(
+        self,
+        features: FeatureSet,
+        **kwargs: Any,
+    ) -> FilterResult:
         symbol = features.symbol
         last_time = self._last_trade_time.get(symbol)
 
         if last_time is None:
-            # No recent trade history for this symbol
             return FilterResult(
                 filter_name=self.name,
                 outcome=FilterOutcome.PASS,
             )
 
-        # Check if we're still in cooldown
-        now = datetime.now(tz=UTC)
+        # Use wall-clock by default; accept reference_ts for backtest mode.
+        now: datetime = kwargs.get("reference_ts") or datetime.now(tz=UTC)
         elapsed = now - last_time
 
         if elapsed < timedelta(minutes=self._cooldown_minutes):

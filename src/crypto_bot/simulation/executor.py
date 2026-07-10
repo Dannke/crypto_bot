@@ -33,7 +33,15 @@ class ExecutionResult:
 
 
 class SignalExecutor:
-    """Handles selected decisions according to runtime mode."""
+    """Handles selected decisions according to runtime mode.
+
+    Single source of truth: all position mutations go to the DB first,
+    then the in-memory tracker is refreshed from the DB. This guarantees
+    the DB and tracker stay consistent even after restart.
+    """
+
+    # Slippage factor: entry price adjusts by this fraction of half-spread
+    _SLIPPAGE_FACTOR: float = 0.5
 
     def __init__(
         self,
@@ -52,7 +60,12 @@ class SignalExecutor:
         self._fees = FeeCalculator()
 
     def _restore_tracker(self, symbol: str | None = None) -> PnLTracker:
-        """Restore PnLTracker from DB on restart (open + closed positions)."""
+        """Restore PnLTracker from DB on restart (open + closed positions).
+
+        DB is the single source of truth — the tracker is rebuilt from it.
+        Entry fees are recalculated from the current fee schedule since they
+        are not persisted to the DB schema.
+        """
         closed = self._repos.positions.list_closed(symbol=symbol, limit=10000)
         realized_pnl = sum(
             (p.pnl_pct or 0.0) / 100.0 * (p.entry_price * p.size)
@@ -67,6 +80,7 @@ class SignalExecutor:
         # Restore open positions so SL/TP checking works after restart
         open_positions = self._repos.positions.list_open(symbol=symbol)
         for p in open_positions:
+            entry_fee = self._fees.calculate(p.size, p.entry_price, is_maker=False).fee_abs
             pp = PaperPosition(
                 symbol=p.symbol,
                 timeframe=p.timeframe,
@@ -77,6 +91,7 @@ class SignalExecutor:
                 take_profit=p.take,
                 entry_time=p.opened_at or datetime.now(tz=UTC),
                 status=p.status,
+                entry_fee_abs=entry_fee,
             )
             tracker.add_position(pp)
 
@@ -142,6 +157,18 @@ class SignalExecutor:
         )
         self._repos.decisions.insert(record)
 
+    @staticmethod
+    def _apply_slippage(price: float, side, spread_pct: float, factor: float) -> float:
+        """Adjust entry/exit price by a fraction of half the spread to model slippage.
+
+        For LONG market entry: price moves up (worse for buyer).
+        For SHORT market entry: price moves down (worse for seller).
+        """
+        slippage = spread_pct / 100.0 * 0.5 * factor
+        if side.value == "LONG":
+            return price * (1.0 + slippage)
+        return price * (1.0 - slippage)
+
     def _open_paper_position(self, report: DecisionReport) -> ExecutionResult:
         if report.side is None:
             return ExecutionResult(handled=False, message="missing side")
@@ -153,11 +180,15 @@ class SignalExecutor:
                 message=f"position already open for {report.symbol} {tf}",
             )
 
-        entry = report.features.get("last_close") or report.features.get("close", 0.0)
-        if entry <= 0:
-            entry = report.features.get("ema_fast", 0.0)
-        if entry <= 0:
+        # Apply slippage to entry price using spread_pct from feature context
+        raw_entry = report.features.get("last_close") or report.features.get("close", 0.0)
+        if raw_entry <= 0:
+            raw_entry = report.features.get("ema_fast", 0.0)
+        if raw_entry <= 0:
             return ExecutionResult(handled=False, message="invalid entry price")
+
+        spread_pct = report.features.get("spread_pct", 0.0)
+        entry = self._apply_slippage(raw_entry, report.side, spread_pct, self._SLIPPAGE_FACTOR)
 
         atr_pct = report.features.get("atr_pct", self._settings.risk.max_stop_distance_pct)
         levels = self._sltp.calculate(entry, report.side, atr_pct)
@@ -171,19 +202,10 @@ class SignalExecutor:
             return ExecutionResult(handled=False, message="invalid stop distance")
 
         size = risk_amount / stop_distance
-        fee = self._fees.calculate(size, entry, is_maker=False)
+        entry_fee = self._fees.calculate(size, entry, is_maker=False)
+        entry_fee_abs = entry_fee.fee_abs
 
-        position = PaperPosition(
-            symbol=report.symbol,
-            timeframe=tf,
-            side=report.side,
-            size=size,
-            entry_price=entry,
-            stop_loss=levels.stop_loss,
-            take_profit=levels.take_profit,
-        )
-        self._tracker.add_position(position)
-
+        # DB first — single source of truth on restart
         position_id = self._repos.positions.insert(
             symbol=report.symbol,
             timeframe=tf,
@@ -206,20 +228,36 @@ class SignalExecutor:
             mode=Mode.PAPER,
         )
 
+        # Then update in-memory tracker (live cache)
+        position = PaperPosition(
+            symbol=report.symbol,
+            timeframe=tf,
+            side=report.side,
+            size=size,
+            entry_price=entry,
+            stop_loss=levels.stop_loss,
+            take_profit=levels.take_profit,
+            entry_fee_abs=entry_fee_abs,
+        )
+        self._tracker.add_position(position)
+
         return ExecutionResult(
             handled=True,
             message=(
                 f"paper {report.side.value} {report.symbol} {tf} "
-                f"entry={entry:.4f} stop={levels.stop_loss:.4f} "
-                f"take={levels.take_profit:.4f} score_pct={score_pct:.2f} fee={fee.fee_abs:.4f}"
+                f"entry={entry:.4f} (raw={raw_entry:.4f} spread={spread_pct:.2f}%) "
+                f"stop={levels.stop_loss:.4f} take={levels.take_profit:.4f} "
+                f"score_pct={score_pct:.2f} fee={entry_fee_abs:.4f}"
             ),
-            position=position,
         )
 
     def check_positions(
         self, current_prices: dict[str, dict[str, float]]
     ) -> dict[str, Any]:
         """Check all open paper positions against current prices for SL/TP.
+
+        DB-first closing: positions are closed in the database first,
+        then the tracker is rebuilt for consistency.
 
         Args:
             current_prices: {symbol: {timeframe: price}} — latest prices per tf.
@@ -250,44 +288,45 @@ class SignalExecutor:
             if price is None or price <= 0:
                 continue
 
-            triggered = False
-            closed_by: str | None = None
-
             if paper_pos.check_stop_loss(price):
                 exit_price = paper_pos.stop_loss
                 closed_by = "stop_loss"
-                triggered = True
             elif paper_pos.check_take_profit(price):
                 exit_price = paper_pos.take_profit
                 closed_by = "take_profit"
-                triggered = True
+            else:
+                continue
 
-            if triggered:
-                self._tracker.close_position(paper_pos, exit_price, closed_by=closed_by)
+            # Close tracker first (with fees), then persist fee-adjusted P&L to DB
+            exit_fee = self._fees.calculate(paper_pos.size, exit_price, is_maker=False)
+            exit_fee_abs = exit_fee.fee_abs
 
-                key = (paper_pos.symbol, paper_pos.timeframe, paper_pos.side.value)
-                db_id = open_by_key.get(key)
-                if db_id:
-                    self._repos.positions.close(
-                        position_id=db_id,
-                        exit_price=exit_price,
-                        pnl_pct=paper_pos.pnl_pct or 0.0,
-                        closed_by=closed_by,
-                    )
+            self._tracker.close_position(paper_pos, exit_price, closed_by=closed_by,
+                                         exit_fee_abs=exit_fee_abs)
 
-                pnl = paper_pos.pnl_abs or 0.0
-                if closed_by == "stop_loss":
-                    stats["closed_by_sl"] += 1
-                    stats["closed_by_sl_pnl"] += pnl
-                else:
-                    stats["closed_by_tp"] += 1
-                    stats["closed_by_tp_pnl"] += pnl
-
-                logger.info(
-                    "paper: %s closed by %s %s %s pnl=%.2f",
-                    paper_pos.symbol, closed_by, paper_pos.timeframe,
-                    paper_pos.side.value, pnl,
+            key = (paper_pos.symbol, paper_pos.timeframe, paper_pos.side.value)
+            db_id = open_by_key.get(key)
+            if db_id:
+                self._repos.positions.close(
+                    position_id=db_id,
+                    exit_price=exit_price,
+                    pnl_pct=paper_pos.pnl_pct or 0.0,
+                    closed_by=closed_by,
                 )
+
+            pnl = paper_pos.pnl_abs or 0.0
+            if closed_by == "stop_loss":
+                stats["closed_by_sl"] += 1
+                stats["closed_by_sl_pnl"] += pnl
+            else:
+                stats["closed_by_tp"] += 1
+                stats["closed_by_tp_pnl"] += pnl
+
+            logger.info(
+                "paper: %s closed by %s %s %s pnl=%.2f (fee=%.4f)",
+                paper_pos.symbol, closed_by, paper_pos.timeframe,
+                paper_pos.side.value, pnl, exit_fee_abs,
+            )
 
         return stats
 
@@ -360,48 +399,48 @@ class SignalExecutor:
                     # pessimistic: SL wins
                     in_range_tp = False
 
-            # Close the position
-            triggered = False
             if in_range_sl:
                 exit_price = paper_pos.stop_loss
                 closed_by = "stop_loss"
-                triggered = True
             elif in_range_tp:
                 exit_price = paper_pos.take_profit
                 closed_by = "take_profit"
-                triggered = True
             else:
                 continue
 
-            if triggered:
-                self._tracker.close_position(paper_pos, exit_price, closed_by=closed_by)
+            # Close tracker first (with fees), then persist fee-adjusted P&L to DB
+            exit_fee = self._fees.calculate(paper_pos.size, exit_price, is_maker=False)
+            exit_fee_abs = exit_fee.fee_abs
 
-                # Persist to DB
-                open_positions = self._repos.positions.list_open()
-                for db_pos in open_positions:
-                    if (db_pos.symbol == symbol and db_pos.timeframe == timeframe
-                            and db_pos.side == paper_pos.side):
-                        self._repos.positions.close(
-                            position_id=db_pos.id,
-                            exit_price=exit_price,
-                            pnl_pct=paper_pos.pnl_pct or 0.0,
-                            closed_by=closed_by,
-                            closed_at_ms=bar_timestamp_ms,
-                        )
-                        break
+            self._tracker.close_position(paper_pos, exit_price, closed_by=closed_by,
+                                         exit_fee_abs=exit_fee_abs)
 
-                pnl = paper_pos.pnl_abs or 0.0
-                if closed_by == "stop_loss":
-                    stats["closed_by_sl"] += 1
-                    stats["closed_by_sl_pnl"] += pnl
-                else:
-                    stats["closed_by_tp"] += 1
-                    stats["closed_by_tp_pnl"] += pnl
+            # Persist to DB with the fee-adjusted P&L from the tracker
+            open_positions = self._repos.positions.list_open()
+            for db_pos in open_positions:
+                if (db_pos.symbol == symbol and db_pos.timeframe == timeframe
+                        and db_pos.side == paper_pos.side):
+                    self._repos.positions.close(
+                        position_id=db_pos.id,
+                        exit_price=exit_price,
+                        pnl_pct=paper_pos.pnl_pct or 0.0,
+                        closed_by=closed_by,
+                        closed_at_ms=bar_timestamp_ms,
+                    )
+                    break
 
-                logger.info(
-                    "paper: %s closed by %s %s %s (intrabar range [%.4f, %.4f]) pnl=%.2f",
-                    symbol, closed_by, timeframe, paper_pos.side.value,
-                    low, high, pnl,
-                )
+            pnl = paper_pos.pnl_abs or 0.0
+            if closed_by == "stop_loss":
+                stats["closed_by_sl"] += 1
+                stats["closed_by_sl_pnl"] += pnl
+            else:
+                stats["closed_by_tp"] += 1
+                stats["closed_by_tp_pnl"] += pnl
+
+            logger.info(
+                "paper: %s closed by %s %s %s (intrabar range [%.4f, %.4f]) pnl=%.2f (fee=%.4f)",
+                symbol, closed_by, timeframe, paper_pos.side.value,
+                low, high, pnl, exit_fee_abs,
+            )
 
         return stats

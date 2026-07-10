@@ -46,6 +46,10 @@ minversion = "8.0"
 testpaths = ["tests"]
 asyncio_mode = "auto"
 addopts = "-ra -q"
+markers = [
+    "cross_validate_live: requires live DB (data/crypto_bot.db) — manual run only",
+    "cross_validate_snapshot: self-contained, uses JSON fixtures — CI-ready",
+]
 
 [tool.ruff]
 line-length = 100

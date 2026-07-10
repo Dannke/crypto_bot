@@ -11,12 +11,10 @@ confidence, so the scorer never ranks a noisy setup highly.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
 
 from ..core.enums import Side, Signal
-from ..core.types import FeatureSet, ScoredCandidate, SignalResult
+from ..core.types import FeatureSet, SignalResult
 from .base import Strategy, StrategyContext
-from .scorer import Scorer
 
 
 def _direction_from_features(f: FeatureSet, ctx: StrategyContext) -> Side | None:
@@ -57,7 +55,6 @@ class SignalEngine(Strategy):
     def __init__(self, ctx: StrategyContext, timeframes: list[str]) -> None:
         self._ctx = ctx
         self._order = _split_timeframes(timeframes)
-        self._scorer = Scorer(ctx, ctx.max_stop_distance_pct)
 
     # Evaluate returns SignalResult directly (the base type is Any for flexibility).
     def evaluate(self, symbol: str, features_by_tf: dict[str, FeatureSet]) -> SignalResult:
@@ -133,6 +130,3 @@ class SignalEngine(Strategy):
             confidence=round(min(1.0, max(0.0, confidence)), 4),
             by_timeframe=by_tf, reason=reason,
         )
-
-    def score(self, features: FeatureSet, signal_result: Any) -> ScoredCandidate | None:
-        return self._scorer.score_candidate(features, signal_result)

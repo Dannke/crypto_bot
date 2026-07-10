@@ -6,8 +6,6 @@ in future stages.
 """
 from __future__ import annotations
 
-from typing import Any
-
 from ..core.enums import Signal
 from .base import MLPrediction
 

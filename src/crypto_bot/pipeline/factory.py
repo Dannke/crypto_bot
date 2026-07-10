@@ -7,7 +7,6 @@ so the decision layer stays testable in isolation.
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any
 
 from ..config.schemas import Settings
 from ..filters import (

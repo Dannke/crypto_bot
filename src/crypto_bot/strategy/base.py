@@ -11,7 +11,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Any
 
-from ..core.types import FeatureSet, ScoredCandidate
+from ..core.types import FeatureSet
 
 
 @dataclass(frozen=True, slots=True)
@@ -36,18 +36,13 @@ class StrategyContext:
 
 
 class Strategy(ABC):
-    """A strategy turns feature sets into scored candidates.
+    """A strategy evaluates feature sets and produces directional signals.
 
-    Lifecycle:
-      ``evaluate(symbol, per_tf_features) -> SignalResult``
-      ``score(features, signal)         -> ScoredCandidate | None``
-    The orchestrator calls evaluate first, then score for the chosen symbol.
+    The only contract a strategy must fulfil is ``evaluate`` — it returns a
+    ``SignalResult`` (BUY/SELL/HOLD per symbol).  Scoring is handled by
+    ``ScoreEngine`` in the pipeline, not by the strategy itself.
     """
 
     @abstractmethod
     def evaluate(self, symbol: str, features_by_tf: dict[str, FeatureSet]) -> Any:
         """Produce a directional signal from multi-timeframe features."""
-
-    @abstractmethod
-    def score(self, features: FeatureSet, signal_result: Any) -> ScoredCandidate | None:
-        """Convert a positive signal + features into a scored candidate."""

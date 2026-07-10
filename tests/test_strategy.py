@@ -2,8 +2,8 @@
 from __future__ import annotations
 
 from crypto_bot.core.enums import Side, Signal
-from crypto_bot.core.types import FeatureSet, SignalResult
-from crypto_bot.strategy import Scorer, SignalEngine, StrategyContext, select_top_candidates
+from crypto_bot.core.types import FeatureSet
+from crypto_bot.strategy import SignalEngine, StrategyContext
 
 
 def _ctx(min_score: float = 65.0, min_confidence: float = 0.6) -> StrategyContext:
@@ -73,47 +73,3 @@ def test_signal_engine_full_long_confluence():
     assert result.signal == Signal.BUY
     assert result.side == Side.LONG
     assert result.confidence == 1.0
-
-
-def test_scorer_filters_low_confidence_and_low_score():
-    feature = _feature("15m", 1.0)
-    scorer = Scorer(_ctx(min_score=95.0, min_confidence=0.9), max_stop_distance_pct=3.0)
-    low_conf = SignalResult(
-        symbol="BTC/USDT",
-        signal=Signal.BUY,
-        side=Side.LONG,
-        confidence=0.5,
-        by_timeframe={},
-        reason="test",
-    )
-    assert scorer.score_candidate(feature, low_conf) is None
-
-    high_conf = SignalResult(
-        symbol="BTC/USDT",
-        signal=Signal.BUY,
-        side=Side.LONG,
-        confidence=1.0,
-        by_timeframe={},
-        reason="test",
-    )
-    assert scorer.score_candidate(feature, high_conf) is None
-
-
-def test_select_top_candidates_orders_by_score_then_confidence():
-    feature = _feature("15m", 1.0)
-    scorer = Scorer(_ctx(min_score=0.0, min_confidence=0.0), max_stop_distance_pct=3.0)
-    signal = SignalResult(
-        symbol="BTC/USDT",
-        signal=Signal.BUY,
-        side=Side.LONG,
-        confidence=1.0,
-        by_timeframe={},
-        reason="test",
-    )
-    one = scorer.score_candidate(feature, signal)
-    two = scorer.score_candidate(feature, signal)
-    assert one is not None and two is not None
-    two.symbol = "ETH/USDT"
-    two.score = one.score + 1
-
-    assert [c.symbol for c in select_top_candidates([one, two], max_count=1)] == ["ETH/USDT"]
