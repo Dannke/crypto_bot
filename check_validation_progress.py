@@ -53,7 +53,7 @@ GETTING_THERE = 20              # >= это -> "рано, но не пусто" 
 # уверенность в его отсутствии. Пороги ниже — минимально достаточные для
 # старта первой сверки, не "достаточно для расчёта Sharpe".
 TF_MIN_BARS = {
-    "1m": 30, "3m": 30, "5m": 20, "15m": 15, "30m": 10,
+    "1m": 30, "3m": 30, "15m": 15, "30m": 10,
     "1h": 8, "2h": 6, "4h": 5, "6h": 4, "12h": 3, "1d": 3,
 }
 TF_MIN_BARS_FALLBACK = 20
@@ -442,7 +442,7 @@ def main() -> None:
     parser.add_argument("--log", default="logs/crypto_bot.log", help="путь к лог-файлу")
     parser.add_argument(
         "--min-bars", type=int, default=None,
-        help="явный порог 'готово' для ВСЕХ TF одинаково. Без флага — разумные дефолты по каждому TF (5m=20, 1h=8, 4h=5 и т.д.)",
+        help="явный порог 'готово' для ВСЕХ TF одинаково. Без флага — разумные дефолты по каждому TF (15m=15, 1h=8, 4h=5 и т.д.)",
     )
     parser.add_argument("--loop-interval", type=float, default=60.0, help="ожидаемый loop_interval_seconds из конфига")
     parser.add_argument("--out", default=None, help="куда сохранить отчёт (по умолчанию validation_report_<ts>.txt)")

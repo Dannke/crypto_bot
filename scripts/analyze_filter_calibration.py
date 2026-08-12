@@ -26,10 +26,12 @@ import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 # Реальные индикаторы проекта — подставить актуальный путь импорта, если
 # отличается (см. features/builder.py для точных имён).
+from crypto_bot.config.settings import load_settings
 from crypto_bot.indicators.adx import adx
 from crypto_bot.indicators.atr import atr_pct
 from crypto_bot.indicators.rsi import rsi
@@ -74,11 +76,18 @@ class CalibrationReport:
     fully_tradeable_rate: float  # всё сразу — это и есть верхняя граница частоты сигналов
     percentiles_adx: dict[str, float]
     percentiles_atr_pct: dict[str, float]
+    percentiles_volume_spike: dict[str, float]
+    n_fully_tradeable: int = 0           # сколько баров прошли все boolean gates
+    n_below_min_score: int = 0           # из них сколько не дотягивают до min_score
+    optimistic_p50: float = 0.0          # медиана optimistic score среди fully_ok
+    optimistic_p75: float = 0.0
+    optimistic_p90: float = 0.0
 
     def print_report(self) -> None:
         print(f"\n=== {self.symbol} {self.timeframe}  (n={self.n_bars} валидных баров) ===")
         print(f"  ADX percentiles: {self._fmt(self.percentiles_adx)}")
         print(f"  ATR% percentiles: {self._fmt(self.percentiles_atr_pct)}")
+        print(f"  Volume spike percentiles: {self._fmt(self.percentiles_volume_spike)}")
         print(f"  --- Pass rate по отдельным условиям ---")
         print(f"  adx >= adx_min:                  {self.adx_pass_rate:.1%}")
         print(f"  volatility в диапазоне:            {self.volatility_pass_rate:.1%}")
@@ -87,10 +96,22 @@ class CalibrationReport:
         print(f"  EMA-стек чист (bull/bear) + ADX:   {self.direction_clean_rate:.1%}")
         print(f"  + RSI в нужной зоне:               {self.rsi_zone_rate:.1%}")
         print(f"  ВСЁ сразу (верхняя граница частоты сигналов): {self.fully_tradeable_rate:.1%}")
+        if self.n_fully_tradeable:
+            print(f"  --- Оптимистичный composite score (liquidity/spread/risk=1.0) ---")
+            print(f"  n_fully_tradeable:                {self.n_fully_tradeable}")
+            print(f"  n_below_min_score={self.n_below_min_score}  ({self.n_below_min_score/self.n_fully_tradeable:.1%} от fully_tradeable)")
+            print(f"  optimistic score p50/p75/p90:     {self.optimistic_p50:.1f} / {self.optimistic_p75:.1f} / {self.optimistic_p90:.1f}")
 
     @staticmethod
     def _fmt(d: dict[str, float]) -> str:
         return ", ".join(f"{k}={v:.2f}" for k, v in d.items())
+
+
+def _resolve_tf_param(param: float | dict[str, float], timeframe: str, default: float) -> float:
+    """Get per-TF value from a ``float | dict[str, float]`` config field."""
+    if isinstance(param, dict):
+        return param.get(timeframe, default)
+    return param
 
 
 def _percentiles(series: pd.Series) -> dict[str, float]:
@@ -105,6 +126,34 @@ def _percentiles(series: pd.Series) -> dict[str, float]:
     }
 
 
+SCORE_WEIGHTS = {
+    "trend": 0.25,
+    "momentum": 0.15,
+    "volume": 0.15,
+    "volatility": 0.10,
+    "liquidity": 0.10,
+    "spread": 0.05,
+    "risk": 0.20,
+}
+
+
+def _optimistic_score(
+    trend: float, momentum: float, volume: float, volatility: float,
+) -> float:
+    """Optimistic composite score: liquidity/spread/risk assumed 1.0 (upper bound)."""
+    w = SCORE_WEIGHTS
+    weighted = (
+        w["trend"] * trend
+        + w["momentum"] * momentum
+        + w["volume"] * volume
+        + w["volatility"] * volatility
+        + w["liquidity"] * 1.0
+        + w["spread"] * 1.0
+        + w["risk"] * 1.0
+    )
+    return weighted * 100.0
+
+
 def analyze(
     df: pd.DataFrame,
     symbol: str,
@@ -114,6 +163,7 @@ def analyze(
     atr_min_pct: float,
     atr_max_pct: float,
     spike_ratio: float,
+    min_score: float = 65.0,
     ema_fast: int = 21,
     ema_mid: int = 50,
     ema_slow: int = 200,
@@ -159,6 +209,34 @@ def analyze(
 
     fully_ok = rsi_zone_ok & vol_ok & volu_ok
 
+    # --- Оптимистичный composite score для fully_ok баров ---
+    # Тренд-strength: линейная интерполяция ADX от adx_min..(adx_min+25)
+    trend_strength = (adx_series - adx_min) / 25.0
+    trend_strength = trend_strength.clip(0.0, 1.0)
+    trend_score = trend_strength.where(bull | bear, 0.0).fillna(0.0)
+
+    # Momentum: отклонение RSI от 50
+    momentum_score = (rsi_series - 50.0).abs() / 50.0
+    momentum_score = momentum_score.clip(0.0, 1.0).fillna(0.0)
+
+    # Volatility: близость ATR к середине диапазона
+    mid_vola = (atr_min_pct + atr_max_pct) / 2.0
+    half_vola = max(1e-9, (atr_max_pct - atr_min_pct) / 2.0)
+    vola_raw = 1.0 - (atr_series - mid_vola).abs() / half_vola
+    volatility_score = vola_raw.clip(0.0, 1.0).fillna(0.0)
+
+    # Volume: плавный скор на основе spike_ratio
+    below = 0.2 * (vol_series / spike_ratio)
+    above = 0.5 + (vol_series - spike_ratio) / spike_ratio
+    vol_raw = np.where(vol_series >= spike_ratio, above.clip(0.0, 1.0), below.clip(0.0, None))
+    volume_score = pd.Series(vol_raw, index=df.index).fillna(0.0)
+
+    optimistic = _optimistic_score(trend_score, momentum_score, volume_score, volatility_score)
+
+    fully_ok_scores = optimistic[fully_ok]
+    n_ft = int(fully_ok.sum())
+    n_ft_below = int((fully_ok_scores < min_score).sum()) if n_ft else 0
+
     return CalibrationReport(
         symbol=symbol,
         timeframe=timeframe,
@@ -171,6 +249,12 @@ def analyze(
         fully_tradeable_rate=float(fully_ok.sum() / n),
         percentiles_adx=_percentiles(adx_series[valid]),
         percentiles_atr_pct=_percentiles(atr_series[valid]),
+        percentiles_volume_spike=_percentiles(vol_series[valid]),
+        n_fully_tradeable=n_ft,
+        n_below_min_score=n_ft_below,
+        optimistic_p50=float(fully_ok_scores.quantile(0.50)) if n_ft else 0.0,
+        optimistic_p75=float(fully_ok_scores.quantile(0.75)) if n_ft else 0.0,
+        optimistic_p90=float(fully_ok_scores.quantile(0.90)) if n_ft else 0.0,
     )
 
 
@@ -180,16 +264,32 @@ def main() -> None:
     parser.add_argument("--symbol", default=None)
     parser.add_argument("--timeframe", default=None)
     parser.add_argument("--all", action="store_true", help="прогнать по всем (symbol, tf) в candles")
-    parser.add_argument("--adx-min", type=float, default=20.0)
-    parser.add_argument("--atr-min-pct", type=float, default=0.5)
-    parser.add_argument("--atr-max-pct", type=float, default=8.0)
-    parser.add_argument("--spike-ratio", type=float, default=1.5)
+    parser.add_argument("--config", default="config/settings.yaml")
+    parser.add_argument("--adx-min", type=float, default=None)
+    parser.add_argument("--atr-min-pct", type=float, default=None)
+    parser.add_argument("--atr-max-pct", type=float, default=None)
+    parser.add_argument("--spike-ratio", type=float, default=None)
+    parser.add_argument("--min-score", type=float, default=65.0)
     args = parser.parse_args()
 
     db_path = Path(args.db)
 
+    # Load defaults from live config (which has per-TF thresholds)
+    config_obj = load_settings(yaml_path=Path(args.config))
+    s = config_obj.settings
+    default_adx_min = s.strategy.trend.adx_min
+    default_spike_ratio = s.strategy.volume.spike_ratio
+    default_atr_min = s.strategy.volatility.atr_min_pct  # float | dict[str, float]
+    default_atr_max = s.strategy.volatility.atr_max_pct  # float | dict[str, float]
+
+    adx_min = args.adx_min if args.adx_min is not None else default_adx_min
+    spike_ratio = args.spike_ratio if args.spike_ratio is not None else default_spike_ratio
+    cli_atr_min = args.atr_min_pct
+    cli_atr_max = args.atr_max_pct
+
     if args.all:
         pairs = list_symbol_timeframes(db_path)
+        pairs = [(sym, tf) for sym, tf in pairs if tf != "5m"]
     else:
         if not args.symbol or not args.timeframe:
             parser.error("укажите --symbol и --timeframe, либо используйте --all")
@@ -197,10 +297,12 @@ def main() -> None:
 
     for symbol, timeframe in pairs:
         df = load_candles(db_path, symbol, timeframe)
+        atr_min = cli_atr_min if cli_atr_min is not None else _resolve_tf_param(default_atr_min, timeframe, 0.5)
+        atr_max = cli_atr_max if cli_atr_max is not None else _resolve_tf_param(default_atr_max, timeframe, 8.0)
         report = analyze(
             df, symbol, timeframe,
-            adx_min=args.adx_min, atr_min_pct=args.atr_min_pct,
-            atr_max_pct=args.atr_max_pct, spike_ratio=args.spike_ratio,
+            adx_min=adx_min, atr_min_pct=atr_min, atr_max_pct=atr_max,
+            spike_ratio=spike_ratio, min_score=args.min_score,
         )
         if report is None:
             print(f"\n=== {symbol} {timeframe}: недостаточно баров для анализа (нужно >= 205) ===")

@@ -10,7 +10,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from ..config.env import Config
-from ..core.enums import Mode, OrderType, RejectReason, Signal, TradeStatus
+from ..core.enums import ExecutorOutcome, Mode, OrderType, RejectReason, Signal, TradeStatus
 from ..core.logging_setup import get_logger
 from ..core.types import DecisionRecord
 from ..decision.decision_report import DecisionReport
@@ -19,6 +19,16 @@ from ..simulation.paper_position import PaperPosition
 from ..simulation.pnl import PnLTracker
 from ..simulation.sl_tp import SLTPCalculator
 from ..storage.db import Repositories
+
+_RESOLVE_TF_FLOAT_DEFAULT = 2.0
+
+
+def _resolve_tf_tp(val: float | dict[str, float], tf: str) -> float:
+    """Resolve per-TF take_profit_risk_multiple, matching ATR pattern."""
+    if isinstance(val, dict):
+        return val.get(tf, _RESOLVE_TF_FLOAT_DEFAULT)
+    return val
+
 
 logger = get_logger(__name__)
 
@@ -30,6 +40,7 @@ class ExecutionResult:
     handled: bool
     message: str
     position: PaperPosition | None = None
+    outcome: ExecutorOutcome | None = None
 
 
 class SignalExecutor:
@@ -55,9 +66,11 @@ class SignalExecutor:
         self._tracker = tracker or self._restore_tracker()
         self._sltp = SLTPCalculator(
             max_stop_distance_pct=self._settings.risk.max_stop_distance_pct,
-            reward_risk_ratio=self._settings.risk.take_profit_risk_multiple,
         )
+        self._take_profit_risk_multiple = self._settings.risk.take_profit_risk_multiple
         self._fees = FeeCalculator()
+        # Emergency drawdown halt flag (sticky - set by backtester when 6% DD hit)
+        self._emergency_halt = False
 
     def _restore_tracker(self, symbol: str | None = None) -> PnLTracker:
         """Restore PnLTracker from DB on restart (open + closed positions).
@@ -107,9 +120,21 @@ class SignalExecutor:
     def tracker(self) -> PnLTracker:
         return self._tracker
 
-    def handle_selected(self, report: DecisionReport) -> ExecutionResult:
+    @property
+    def emergency_halt(self) -> bool:
+        return self._emergency_halt
+
+    @emergency_halt.setter
+    def emergency_halt(self, value: bool) -> None:
+        self._emergency_halt = value
+
+    def handle_selected(
+        self,
+        report: DecisionReport,
+        *,
+        current_prices: dict[tuple[str, str], float] | None = None,
+    ) -> ExecutionResult:
         """Process an accepted decision: journal + optional paper position."""
-        self._persist_decision(report, accepted=True)
         tf: str = str(report.features.get("timeframe", ""))
         self._repos.signals.insert(
             symbol=report.symbol,
@@ -124,13 +149,32 @@ class SignalExecutor:
 
         mode = self._config.mode
         if mode == Mode.SIGNAL_ONLY:
+            self._persist_decision(report, accepted=True, outcome="no_position")
             return ExecutionResult(
                 handled=True,
                 message=f"signal logged: {report.signal.value} {report.symbol}",
             )
 
         if mode == Mode.PAPER:
-            return self._open_paper_position(report)
+            result = self._open_paper_position(report, current_prices=current_prices)
+            # Determine outcome: prefer explicit enum from gate, fall back to
+            # legacy string matching for older ExecutionResult call-sites.
+            if result.outcome is not None:
+                outcome = result.outcome.value
+            elif result.handled:
+                outcome = ExecutorOutcome.POSITION_OPENED.value
+            else:
+                msg = result.message.lower()
+                if "slot_taken" in msg or "position already open" in msg:
+                    outcome = ExecutorOutcome.SLOT_TAKEN.value
+                elif "drawdown" in msg:
+                    outcome = ExecutorOutcome.DRAWDOWN_HALT.value
+                elif "max open positions" in msg or "max positions reached" in msg:
+                    outcome = ExecutorOutcome.MAX_POSITIONS_REACHED.value
+                else:
+                    outcome = ExecutorOutcome.NO_POSITION.value
+            self._persist_decision(report, accepted=result.handled, outcome=outcome)
+            return result
 
         return ExecutionResult(
             handled=False,
@@ -139,9 +183,40 @@ class SignalExecutor:
 
     def handle_rejected(self, report: DecisionReport) -> None:
         """Journal a rejected candidate."""
-        self._persist_decision(report, accepted=False)
+        # Rejected by pipeline — no executor outcome
+        self._persist_decision(report, accepted=False, outcome="no_position")
 
-    def _persist_decision(self, report: DecisionReport, *, accepted: bool) -> None:
+    def handle_rejected_many(self, reports: list) -> None:
+        """Journal many rejected candidates with a single DB transaction."""
+        if not reports:
+            return
+        records: list = []
+        for report in reports:
+            reason = report.reject_reason or RejectReason.LOW_SCORE
+            detail = report.explanation or (report.rejected_by or "")
+            tf: str = str(report.features.get("timeframe", ""))
+            records.append(
+                DecisionRecord(
+                    timestamp=report.timestamp,
+                    symbol=report.symbol,
+                    timeframe=tf,
+                    accepted=False,
+                    reason=reason,
+                    detail=detail[:1000],
+                    score=report.total_score if report.total_score > 0 else None,
+                    signal=report.signal if report.signal != Signal.HOLD else None,
+                    outcome="no_position",
+                )
+            )
+        self._repos.decisions.insert_many(records)
+
+    def _persist_decision(
+        self,
+        report: DecisionReport,
+        *,
+        accepted: bool,
+        outcome: str = "no_position",
+    ) -> None:
         reason = report.reject_reason or RejectReason.LOW_SCORE
         detail = report.explanation or (report.rejected_by or "")
         tf: str = str(report.features.get("timeframe", ""))
@@ -154,6 +229,7 @@ class SignalExecutor:
             detail=detail[:1000],
             score=report.total_score if report.total_score > 0 else None,
             signal=report.signal if report.signal != Signal.HOLD else None,
+            outcome=outcome,
         )
         self._repos.decisions.insert(record)
 
@@ -169,11 +245,59 @@ class SignalExecutor:
             return price * (1.0 + slippage)
         return price * (1.0 - slippage)
 
-    def _open_paper_position(self, report: DecisionReport) -> ExecutionResult:
+    def _open_paper_position(
+        self,
+        report: DecisionReport,
+        *,
+        current_prices: dict[tuple[str, str], float] | None = None,
+    ) -> ExecutionResult:
         if report.side is None:
             return ExecutionResult(handled=False, message="missing side")
-
         tf: str = str(report.features.get("timeframe", ""))
+
+        # Emergency drawdown halt - no new positions allowed
+        if self._emergency_halt:
+            return ExecutionResult(
+                handled=False,
+                message="emergency drawdown halt active - no new positions"
+            )
+
+        # Unrealized P&L drawdown gate — block new positions if open losses exceed threshold.
+        # If caller did not supply current_prices (live mode), fall back to latest
+        # candle close from the DB for each open position.
+        threshold = self._settings.risk.max_open_unrealized_drawdown_pct
+        if threshold > 0:
+            if current_prices is None:
+                current_prices = {}
+                for pos in self._tracker.positions:
+                    if not pos.is_open:
+                        continue
+                    close = self._repos.candles.latest_close(pos.symbol, pos.timeframe)
+                    if close is not None:
+                        current_prices[(pos.symbol, pos.timeframe)] = close
+            if current_prices:
+                open_upl = self._tracker.unrealized_pnl(current_prices)
+                open_upl_pct = open_upl / self._tracker.current_equity * 100.0 if self._tracker.current_equity > 0 else 0.0
+                if open_upl_pct < -abs(threshold):
+                    return ExecutionResult(
+                        handled=False,
+                        message=(
+                            f"open unrealized drawdown {open_upl_pct:.1f}% "
+                            f"exceeds threshold {threshold:.1f}%"
+                        ),
+                        outcome=ExecutorOutcome.OPEN_UNREALIZED_DRAWDOWN,
+                    )
+
+        open_positions = [p for p in self._tracker.positions if p.is_open]
+        if len(open_positions) >= self._settings.risk.max_open_positions:
+            return ExecutionResult(
+                handled=False,
+                message=(
+                    f"max positions reached ({len(open_positions)} >= "
+                    f"{self._settings.risk.max_open_positions})"
+                ),
+            )
+
         if self._repos.positions.open_exists(report.symbol, timeframe=tf):
             return ExecutionResult(
                 handled=False,
@@ -191,7 +315,8 @@ class SignalExecutor:
         entry = self._apply_slippage(raw_entry, report.side, spread_pct, self._SLIPPAGE_FACTOR)
 
         atr_pct = report.features.get("atr_pct", self._settings.risk.max_stop_distance_pct)
-        levels = self._sltp.calculate(entry, report.side, atr_pct)
+        tp_multiple = _resolve_tf_tp(self._take_profit_risk_multiple, tf)
+        levels = self._sltp.calculate(entry, report.side, atr_pct, reward_risk_ratio=tp_multiple)
 
         # Score-based position sizing: higher score = larger position
         score_pct = min(1.0, max(0.1, report.total_score / 100.0))
@@ -441,6 +566,71 @@ class SignalExecutor:
                 "paper: %s closed by %s %s %s (intrabar range [%.4f, %.4f]) pnl=%.2f (fee=%.4f)",
                 symbol, closed_by, timeframe, paper_pos.side.value,
                 low, high, pnl, exit_fee_abs,
+            )
+
+        return stats
+
+    def close_all_positions(
+        self,
+        reason: str,
+        current_prices: dict[str, dict[str, float]] | None = None,
+        closed_at_ms: int | None = None,
+    ) -> dict[str, Any]:
+        """Emergency close all open positions (e.g., on drawdown halt).
+
+        Args:
+            reason: Reason for emergency close (logged).
+            current_prices: {symbol: {timeframe: price}} — latest prices per tf.
+                If not provided, uses entry_price as fallback.
+            closed_at_ms: Simulation timestamp for DB bookkeeping.  When None
+                (live mode) the repo falls back to wall-clock time.
+
+        Returns stats dict with counts and P&L.
+        """
+        stats = {
+            "closed": 0,
+            "closed_pnl": 0.0,
+        }
+
+        for paper_pos in list(self._tracker.positions):
+            if not paper_pos.is_open:
+                continue
+
+            # Determine exit price
+            exit_price = paper_pos.entry_price
+            if current_prices:
+                exit_price = current_prices.get(paper_pos.symbol, {}).get(paper_pos.timeframe)
+            if exit_price is None or exit_price <= 0:
+                exit_price = paper_pos.entry_price  # fallback
+
+            exit_fee = self._fees.calculate(paper_pos.size, exit_price, is_maker=False)
+            exit_fee_abs = exit_fee.fee_abs
+
+            self._tracker.close_position(paper_pos, exit_price,
+                                         closed_by=reason, exit_fee_abs=exit_fee_abs)
+
+            # Persist to DB
+            open_positions = self._repos.positions.list_open()
+            for db_pos in open_positions:
+                if (db_pos.symbol == paper_pos.symbol
+                    and db_pos.timeframe == paper_pos.timeframe
+                    and db_pos.side == paper_pos.side):
+                    self._repos.positions.close(
+                        position_id=db_pos.id,
+                        exit_price=exit_price,
+                        pnl_pct=paper_pos.pnl_pct or 0.0,
+                        closed_by=reason,
+                        closed_at_ms=closed_at_ms,
+                    )
+                    break
+
+            pnl = paper_pos.pnl_abs or 0.0
+            stats["closed"] += 1
+            stats["closed_pnl"] += pnl
+            logger.warning(
+                "paper: EMERGENCY CLOSE %s %s %s @ %.4f by %s pnl=%.2f",
+                paper_pos.symbol, paper_pos.timeframe, paper_pos.side.value,
+                exit_price, reason, pnl,
             )
 
         return stats

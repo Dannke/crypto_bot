@@ -33,13 +33,13 @@ def repos(tmp_path):
 # Schema / migration
 # --------------------------------------------------------------------------- #
 def test_schema_version_is_one(repos):
-    assert repos.db.schema_version() in ("1", "2", "3")
+    assert repos.db.schema_version() in ("3", "4", "5")
 
 
 def test_migration_is_idempotent(repos):
     # Re-running migrate via a fresh Database on the same file must not error.
     db2 = Database(db_path=repos.db.db_path)
-    assert db2.schema_version() in ("1", "2", "3")
+    assert db2.schema_version() in ("3", "4", "5")
     db2.close()
 
 

@@ -3,7 +3,9 @@
 Walks historical candle data bar-by-bar through the *same* decision pipeline
 that the live orchestrator uses — no copied logic, no shortcuts.
 
-Supports multi-symbol backtesting with real BTC/ETH correlation features.
+Supports multi-symbol multi-timeframe backtesting with a unified clock that
+ticks on *every* bar close across *all* configured timeframes — the same
+shared-capital regime as the live SignalExecutor.
 
 Usage (from CLI)::
 
@@ -13,9 +15,10 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 
 from ..config.env import Config
+from ..core.enums import Mode
 from ..core.logging_setup import get_logger
 from ..core.policy import timeframe_to_seconds
 from ..core.types import FeatureSet
@@ -30,7 +33,6 @@ from ..pipeline.factory import (
 from ..simulation.executor import SignalExecutor
 from ..simulation.pnl import PnLSummary, PnLTracker
 from ..storage.db import Database, Repositories
-from .backtest_clock import BacktestClock
 from .historical_source import HistoricalCandleSource
 
 logger = get_logger(__name__)
@@ -93,6 +95,9 @@ class Backtester:
             ),
         )
 
+        # Emergency drawdown halt flag (sticky - once triggered, never re-triggers)
+        self._emergency_halt_triggered = False
+
         settings = config.settings
         quote = settings.universe.quote.upper()
 
@@ -125,8 +130,55 @@ class Backtester:
         )
         self._source = source or HistoricalCandleSource(self._repos.candles)
 
-        # Primary timeframe drives the clock
-        self._trigger_tf = self._timeframes[0]
+    def _build_unified_clock(
+        self,
+        reference_symbol: str,
+        timeframes: list[str],
+        start_ms: int,
+        end_ms: int,
+    ) -> list[tuple[int, list[str]]]:
+        """Build a single clock from close timestamps of ALL timeframes.
+
+        Each tick corresponds to the moment when at least one timeframe's bar
+        closes.  The returned list contains ``(as_of_ms, [fired_timeframes])``
+        pairs sorted by time, so the caller can build features only for those
+        timeframes that actually produced a new bar on each tick.
+
+        Bar boundaries are calendar-based and symbol-independent — a 1h bar
+        closes at ``:00`` for every symbol.  A single reference symbol with
+        continuous history is sufficient to compute the tick grid for all
+        symbols.
+        """
+        ts_to_tfs: dict[int, set[str]] = {}
+        for tf in timeframes:
+            period_ms = timeframe_to_seconds(tf) * 1000
+            candles = self._source.slice_between(start_ms, end_ms, reference_symbol, tf)
+            for c in candles:
+                close_ts = c.timestamp + period_ms
+                ts_to_tfs.setdefault(close_ts, set()).add(tf)
+        return sorted(
+            (ts, sorted(tfs)) for ts, tfs in ts_to_tfs.items()
+            if start_ms <= ts <= end_ms
+        )
+
+    def _record_equity(self, as_of: int) -> None:
+        current_prices: dict[tuple[str, str], float] = {}
+        for pos in self._executor.tracker.positions:
+            if not pos.is_open:
+                continue
+            chk = self._source.slice(as_of, pos.symbol, pos.timeframe)
+            if chk:
+                current_prices[(pos.symbol, pos.timeframe)] = chk[-1].close
+        tracker = self._executor.tracker
+        realized_pnl = sum(p.pnl_abs or 0.0 for p in tracker.positions if p.is_closed)
+        equity_now = tracker.initial_equity + realized_pnl + tracker.unrealized_pnl(current_prices)
+        tracker.record_equity(
+            datetime.fromtimestamp(as_of / 1000, tz=UTC), equity_now,
+        )
+        self._repos.equity.insert(
+            currency=self._quote, equity=equity_now,
+            drawdown_pct=None, mode=Mode.PAPER, ts_ms=as_of,
+        )
 
     async def run_async(self) -> PnLSummary:
         """Execute the replay loop asynchronously."""
@@ -151,17 +203,18 @@ class Backtester:
                         except (AssertionError, Exception) as exc:
                             logger.info("bt: cannot load %s %s — %s", sym, tf, exc)
 
-            # Clock is driven by the trigger timeframe
-            trigger_candles = self._source.slice(self._end_ms, self._symbols[0], self._trigger_tf) if self._symbols else []
-            period_ms = timeframe_to_seconds(self._trigger_tf) * 1000
-            close_ts = [c.timestamp + period_ms for c in trigger_candles]
-            clock = BacktestClock(timestamps=close_ts, index=0)
-            clock.timestamps = [t for t in clock.timestamps if self._start_ms <= t <= self._end_ms]
+            # Unified clock: ticks on every bar close across ALL timeframes
+            unified_clock = self._build_unified_clock(
+                self._symbols[0], self._timeframes,
+                self._start_ms, self._end_ms,
+            )
+            fastest_tf = min(self._timeframes, key=lambda tf: timeframe_to_seconds(tf))
 
             bar_count = 0
-            for as_of in clock:
+            for as_of, fired_tfs in unified_clock:
                 try:
-                    # Build features for all symbols
+                    # 1. Build features for ALL symbols (needed for correlation),
+                    #    but only pass fired TFs into the pipeline
                     features_map: dict[str, dict[str, FeatureSet]] = {}
                     symbol_candles: dict[str, dict[str, list]] = {}
 
@@ -174,14 +227,22 @@ class Backtester:
                         if sym_tf_candles:
                             symbol_candles[sym] = sym_tf_candles
 
-                    # Compute real correlation features from timestamp-aligned closes
-                    tf_for_corr = self._trigger_tf
+                    # Correlation reference timeframe — use fastest loaded
+                    tf_for_corr = fastest_tf
                     btc_closes = closes_by_timestamp(symbol_candles, self._btc_sym, tf_for_corr) if self._btc_sym in symbol_candles else {}
                     eth_closes = closes_by_timestamp(symbol_candles, self._eth_sym, tf_for_corr) if self._eth_sym in symbol_candles else {}
 
                     for sym in self._symbols:
                         if sym not in symbol_candles:
                             continue
+                        # Only include timeframes that actually fired on this tick
+                        fired_features = {
+                            tf: symbol_candles[sym][tf]
+                            for tf in fired_tfs if tf in symbol_candles[sym]
+                        }
+                        if not fired_features:
+                            continue
+
                         sym_closes = closes_by_timestamp(symbol_candles, sym, tf_for_corr)
                         corr_btc = 1.0 if sym == self._btc_sym else aligned_correlation(sym_closes, btc_closes)
                         corr_eth = 1.0 if sym == self._eth_sym else aligned_correlation(sym_closes, eth_closes)
@@ -190,7 +251,7 @@ class Backtester:
                         try:
                             features_map[sym] = self._builder.build_all(
                                 sym,
-                                symbol_candles[sym],
+                                fired_features,
                                 market=market,
                                 correlation_btc=corr_btc,
                                 correlation_eth=corr_eth,
@@ -199,17 +260,7 @@ class Backtester:
                             logger.info("bt: skip sym=%s ts=%d — %s", sym, as_of, exc)
 
                     if not features_map:
-                        # No features for any symbol — still need to check SL/TP
-                        first_sym = self._symbols[0]
-                        trigger_bar = trigger_candles[bar_count] if bar_count < len(trigger_candles) else None
-                        if trigger_bar:
-                            self._executor.check_positions_range(
-                                first_sym, self._trigger_tf,
-                                trigger_bar.low, trigger_bar.high,
-                                open_price=trigger_bar.open,
-                                conflict_resolution=self._conflict,
-                                bar_timestamp_ms=trigger_bar.timestamp,
-                            )
+                        self._record_equity(as_of)
                         bar_count += 1
                         continue
                 except Exception as exc:
@@ -217,54 +268,97 @@ class Backtester:
                     bar_count += 1
                     continue
 
-                try:
-                    result = self._pipeline.process(
-                        features_map,
-                        self._strategy,
-                        per_timeframe=True,
-                        as_of_ms=as_of,
-                    )
+                # Emergency drawdown check FIRST — before pipeline (sticky halt)
+                # Uses mark-to-market equity with THIS tick's bar close so we
+                # catch intrabar equity drops BEFORE SL/TP fires at the same
+                # timestamp.
+                tracker = self._executor.tracker
+                peak = tracker.peak_equity
+                mtm_prices: dict[tuple[str, str], float] = {}
+                for pos in tracker.positions:
+                    if pos.is_open:
+                        chk = self._source.slice(as_of, pos.symbol, pos.timeframe)
+                        if chk:
+                            mtm_prices[(pos.symbol, pos.timeframe)] = chk[-1].close
+                realized_pnl = sum(p.pnl_abs or 0.0 for p in tracker.positions if p.is_closed)
+                current = tracker.initial_equity + realized_pnl + tracker.unrealized_pnl(mtm_prices)
+                if (not self._emergency_halt_triggered and peak > 0 and current < peak):
+                    dd_pct = (peak - current) / peak * 100.0
+                    if dd_pct >= self._config.settings.risk.emergency_drawdown_pct:
+                        self._emergency_halt_triggered = True
+                        self._executor.emergency_halt = True
+                        logger.warning(
+                            "bt: emergency drawdown %.2f%% >= %.2f%% — closing ALL positions (halt sticky)",
+                            dd_pct, self._config.settings.risk.emergency_drawdown_pct,
+                        )
+                        current_prices: dict[str, dict[str, float]] = {}
+                        for (sym, tf), price in mtm_prices.items():
+                            current_prices.setdefault(sym, {})[tf] = price
+                        self._executor.close_all_positions(
+                            "emergency_drawdown", current_prices, closed_at_ms=as_of,
+                        )
 
-                    selected = result.get("selected", [])
-                    rejected = result.get("rejected", [])
-                    processed = result.get("total_processed", 0)
-                    reject_reasons = [
-                        (r.reject_reason.value if r.reject_reason else "none",
-                         r.rejected_by or "?",
-                         r.explanation[:80] if r.explanation else "")
-                        for r in rejected[:3]
-                    ]
-                    logger.info(
-                        "bt: pipeline ts=%d processed=%d selected=%d rejected=%d reasons=%s",
-                        as_of, processed, len(selected), len(rejected),
-                        reject_reasons,
-                    )
+                # Pipeline — skip entirely if halted (flag already set)
+                if not self._emergency_halt_triggered:
+                    try:
+                        result = self._pipeline.process(
+                            features_map,
+                            self._strategy,
+                            per_timeframe=True,
+                            as_of_ms=as_of,
+                        )
 
-                    for report in selected:
-                        self._executor.handle_selected(report)
-                    for report in rejected:
-                        self._executor.handle_rejected(report)
-                except Exception as exc:
-                    logger.exception("bt: pipeline failed at ts=%d: %s", as_of, exc)
+                        selected = result.get("selected", [])
+                        rejected = result.get("rejected", [])
+                        processed = result.get("total_processed", 0)
+                        reject_reasons = [
+                            (r.reject_reason.value if r.reject_reason else "none",
+                             r.rejected_by or "?",
+                             r.explanation[:80] if r.explanation else "")
+                            for r in rejected[:3]
+                        ]
+                        logger.info(
+                            "bt: pipeline ts=%d processed=%d selected=%d rejected=%d reasons=%s",
+                            as_of, processed, len(selected), len(rejected),
+                            reject_reasons,
+                        )
 
-                # Check SL/TP for all open positions (intrabar range)
+                        # current prices for unrealized P&L gate in executor
+                        current_prices: dict[tuple[str, str], float] = {}
+                        for pos in self._executor.tracker.positions:
+                            if not pos.is_open:
+                                continue
+                            chk = self._source.slice(as_of, pos.symbol, pos.timeframe)
+                            if chk:
+                                current_prices[(pos.symbol, pos.timeframe)] = chk[-1].close
+
+                        for report in selected:
+                            self._executor.handle_selected(report, current_prices=current_prices)
+                        self._executor.handle_rejected_many(rejected)
+                    except Exception as exc:
+                        logger.exception("bt: pipeline failed at ts=%d: %s", as_of, exc)
+
+                # SL/TP for ALL open positions
                 for pos in list(self._executor.tracker.positions):
                     if not pos.is_open:
                         continue
-                    if pos.timeframe not in self._timeframes:
-                        continue
-                    chk_candles = self._source.slice(as_of, pos.symbol, pos.timeframe)
-                    if not chk_candles:
-                        continue
-                    bar = chk_candles[-1]
-                    self._executor.check_positions_range(
-                        pos.symbol, pos.timeframe,
-                        bar.low, bar.high,
-                        open_price=bar.open,
-                        conflict_resolution=self._conflict,
-                        bar_timestamp_ms=bar.timestamp,
-                    )
+                    price_tf = fastest_tf if fastest_tf in self._timeframes else pos.timeframe
+                    if not self._source.is_loaded(pos.symbol, price_tf):
+                        price_tf = pos.timeframe
+                    bar = self._source.slice(as_of, pos.symbol, price_tf)
+                    if bar:
+                        self._executor.check_positions_range(
+                            pos.symbol, pos.timeframe,
+                            bar[-1].low, bar[-1].high,
+                            open_price=bar[-1].open,
+                            conflict_resolution=self._conflict,
+                            bar_timestamp_ms=as_of,
+                        )
+
+                # Record equity on every tick
+                self._record_equity(as_of)
                 bar_count += 1
+
 
             summary = self._executor.tracker.get_summary()
             closed_positions = [p for p in self._executor.tracker.positions if p.is_closed]
@@ -293,3 +387,7 @@ class Backtester:
     @property
     def manifest(self) -> BacktestManifest:
         return self._manifest
+
+    @property
+    def emergency_halt_triggered(self) -> bool:
+        return self._emergency_halt_triggered

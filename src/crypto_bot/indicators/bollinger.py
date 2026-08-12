@@ -12,6 +12,8 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from ._numpy import rolling_mean, rolling_std
+
 
 @dataclass(frozen=True, slots=True)
 class BollingerResult:
@@ -35,12 +37,14 @@ def bollinger_bands(
         raise ValueError("Bollinger period must be >= 1")
     if std <= 0:
         raise ValueError("Bollinger std must be > 0")
-    s = pd.Series(closes, dtype="float64").reset_index(drop=True)
-    mid = s.rolling(period, min_periods=period).mean()
-    sigma = s.rolling(period, min_periods=period).std(ddof=0)
+    s = np.asarray(closes, dtype="float64")
+    mid = rolling_mean(s, period)
+    sigma = rolling_std(s, period)
     upper = mid + std * sigma
     lower = mid - std * sigma
-    return BollingerResult(upper=upper, mid=mid, lower=lower)
+    return BollingerResult(
+        upper=pd.Series(upper), mid=pd.Series(mid), lower=pd.Series(lower)
+    )
 
 
 def bollinger_position(
@@ -56,3 +60,22 @@ def bollinger_position(
     return (pd.Series(closes, dtype="float64").reset_index(drop=True) - bb.lower) / width.replace(
         0.0, np.nan
     )
+
+
+def bollinger_position_np(
+    closes: np.ndarray, period: int = 20, std: float = 2.0
+) -> np.ndarray:
+    """Numpy variant returning the raw position array (backtest hot path)."""
+    if period < 1:
+        raise ValueError("Bollinger period must be >= 1")
+    if std <= 0:
+        raise ValueError("Bollinger std must be > 0")
+    mid = rolling_mean(closes, period)
+    sigma = rolling_std(closes, period)
+    upper = mid + std * sigma
+    lower = mid - std * sigma
+    width = upper - lower
+    with np.errstate(divide="ignore", invalid="ignore"):
+        out = (closes - lower) / width
+    out[width == 0.0] = np.nan
+    return out

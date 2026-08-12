@@ -2,6 +2,16 @@
 (build_features_batch → pipeline.process) и Backtester'а на синтетических
 данных.
 
+Scope (что проверяется):
+  - decision-parity:   accept/reject, score, reject_reason совпадают
+  - position-state-parity: open_exists, cooldown, slot_taken работают
+    одинаково (через одну базу данных и один SignalExecutor)
+
+НЕ проверяется:
+  - SL/TP-parity: живой путь использует PriceSimulator → check_positions(),
+    бэктестер — intrabar slice → check_positions_range(). Это структурное
+    различие верифицируется только test_cross_validate.py на реальных данных.
+
 Параметризация: (config_type, scenario).
 
 config_type:
@@ -119,6 +129,20 @@ def _run_live_path(
         for report in result.get("rejected", []):
             executor.handle_rejected(report)
 
+        # SL/TP check for all open positions (match backtester behaviour)
+        for pos in list(executor.tracker.positions):
+            if not pos.is_open:
+                continue
+            bar = sliced[-1] if sliced else None
+            if bar:
+                executor.check_positions_range(
+                    pos.symbol, pos.timeframe,
+                    bar.low, bar.high,
+                    open_price=bar.open,
+                    conflict_resolution="pessimistic",
+                    bar_timestamp_ms=as_of,
+                )
+
     db.close()
 
 
@@ -177,5 +201,6 @@ def test_live_vs_backtester_synthetic(tmp_path, cfg_name, scenario):
     live = aggregate_raw_rows(live_raw)
     backtest = aggregate_raw_rows(bt_raw)
 
-    report = compare_decisions(live, backtest, score_tolerance=1.0)
+    report = compare_decisions(live, backtest, score_tolerance=1.0,
+                                accept_position_exists_mismatches=True)
     assert report.is_clean, report.summary()

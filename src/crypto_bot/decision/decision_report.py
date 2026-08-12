@@ -39,7 +39,7 @@ class DecisionReport:
     reject_reason: RejectReason | None = None
 
     # Feature snapshot
-    features: dict[str, float] = field(default_factory=dict)
+    features: dict[str, float | str] = field(default_factory=dict)
 
     # Additional context
     strategy_name: str = ""

@@ -33,8 +33,8 @@ strategy:
     rsi_short_max: 50.0
   volatility:
     atr_period: 14
-    atr_min_pct: 0.5       # exclude dead coins
-    atr_max_pct: 8.0       # exclude extreme movers
+    atr_min_pct: 0.5       # exclude dead coins (scalar or per-TF dict)
+    atr_max_pct: 8.0       # exclude extreme movers (scalar or per-TF dict)
     bb_period: 20
     bb_std: 2.0
   volume:

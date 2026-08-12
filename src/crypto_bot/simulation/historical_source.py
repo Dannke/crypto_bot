@@ -58,10 +58,11 @@ class HistoricalCandleSource:
         close_times = [c.timestamp + period_ms for c in candles]
         self._cache[(symbol, timeframe)] = (candles, close_times, period_ms)
 
-    def slice(self, as_of_ms: int, symbol: str, timeframe: str) -> list[Candle]:
-        """Return all bars fully closed by *as_of_ms* for a symbol/timeframe pair.
+    def slice(self, as_of_ms: int, symbol: str, timeframe: str, limit: int = 400) -> list[Candle]:
+        """Return up to ``limit`` bars fully closed by *as_of_ms*.
 
-        This is an O(log n) operation on the in-memory cache.  Every bar whose
+        This is an O(log n) operation on the in-memory cache, followed by a
+        constant-sized slice of at most ``limit`` rows.  Every bar whose
         ``open + period <= as_of_ms`` is included; partially-formed bars are
         excluded by construction, so no look-ahead is possible.
         """
@@ -73,7 +74,28 @@ class HistoricalCandleSource:
         if not candles:
             return []
         idx = bisect.bisect_right(close_times, as_of_ms)
-        return candles[:idx]
+        start = max(0, idx - limit)
+        return candles[start:idx]
+
+    def slice_between(
+        self, start_ms: int, end_ms: int, symbol: str, timeframe: str,
+    ) -> list[Candle]:
+        """Return ALL bars whose close time is within [start_ms, end_ms].
+
+        Unlike :meth:`slice` there is no ``limit`` cap — callers need the
+        complete window (e.g. building the unified replay clock) and must
+        not silently drop history.
+        """
+        key = (symbol, timeframe)
+        entry = self._cache.get(key)
+        if entry is None:
+            return []
+        candles, close_times, _ = entry
+        if not candles:
+            return []
+        lo = bisect.bisect_left(close_times, start_ms)
+        hi = bisect.bisect_right(close_times, end_ms)
+        return candles[lo:hi]
 
     def is_loaded(self, symbol: str, timeframe: str) -> bool:
         """Check if a specific (symbol, timeframe) pair is loaded."""

@@ -43,18 +43,21 @@ class RawMetrics:
     vol_spike: float      # volume / volume_ma
 
 
-def _df(candles: list[Candle]) -> pd.DataFrame:
-    if not candles:
-        return pd.DataFrame(columns=["open", "high", "low", "close", "volume"])
-    return pd.DataFrame(
-        [
-            {
-                "open": c.open, "high": c.high, "low": c.low,
-                "close": c.close, "volume": c.volume,
-            }
-            for c in candles
-        ]
-    )
+def _arrays(candles: list[Candle]) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Extract OHLCV columns as float64 arrays in one pass (backtest hot path)."""
+    n = len(candles)
+    open_a = np.empty(n, dtype="float64")
+    high_a = np.empty(n, dtype="float64")
+    low_a = np.empty(n, dtype="float64")
+    close_a = np.empty(n, dtype="float64")
+    vol_a = np.empty(n, dtype="float64")
+    for i, c in enumerate(candles):
+        open_a[i] = c.open
+        high_a[i] = c.high
+        low_a[i] = c.low
+        close_a[i] = c.close
+        vol_a[i] = c.volume
+    return open_a, high_a, low_a, close_a, vol_a
 
 
 def compute_raw_metrics(
@@ -71,7 +74,7 @@ def compute_raw_metrics(
     Raises ``InsufficientDataError`` if there aren't enough bars even for the
     shortest indicator — callers treat that as "skip symbol".
     """
-    df = _df(candles)
+    n = len(candles)
     min_needed = max(
         p_trend_ema[2],
         p_mom_rsi + 1,
@@ -79,17 +82,18 @@ def compute_raw_metrics(
         p_vol_bb[0],
         p_volma,
     )
-    if len(df) < min_needed:
+    if n < min_needed:
         raise InsufficientDataError(
-            f"need >= {min_needed} candles for tf={timeframe}, got {len(df)}"
+            f"need >= {min_needed} candles for tf={timeframe}, got {n}"
         )
 
-    ema_st = ema_cross_state(df["close"], *p_trend_ema)
-    adx_series = adx(df["high"], df["low"], df["close"], period=p_vol_atr)
-    rsi_series = rsi(df["close"], period=p_mom_rsi)
-    atr_series = atr_pct(df["high"], df["low"], df["close"], period=p_vol_atr)
-    bb_pos_series = bollinger_position(df["close"], period=p_vol_bb[0], std=p_vol_bb[1])
-    vol_series = volume_spike_ratio(df["volume"], period=p_volma)
+    _, high, low, close, volume = _arrays(candles)
+    ema_st = ema_cross_state(close, *p_trend_ema)
+    adx_series = adx(high, low, close, period=p_vol_atr)
+    rsi_series = rsi(close, period=p_mom_rsi)
+    atr_series = atr_pct(high, low, close, period=p_vol_atr)
+    bb_pos_series = bollinger_position(close, period=p_vol_bb[0], std=p_vol_bb[1])
+    vol_series = volume_spike_ratio(volume, period=p_volma)
 
     def _last(s: pd.Series) -> float:
         return float(s.iloc[-1]) if len(s) and not np.isnan(s.iloc[-1]) else float("nan")
@@ -165,8 +169,8 @@ def _infer_market_regime(m: RawMetrics, adx_min: float) -> str:
 
 
 def _bb_levels(candles: list[Candle], period: int, std: float) -> tuple[float, float, float]:
-    df = _df(candles)
-    bb = bollinger_bands(df["close"], period, std)
+    close = _arrays(candles)[3]
+    bb = bollinger_bands(close, period, std)
     return bb.last()
 
 
@@ -181,8 +185,8 @@ class FeatureBuilderParams:
     bb: tuple[int, float]
     volma_period: int
     adx_min: float
-    atr_lo_pct: float
-    atr_hi_pct: float
+    atr_lo_pct: float | dict[str, float]
+    atr_hi_pct: float | dict[str, float]
     vol_spike_ratio: float
     min_quote_volume: float = 5_000_000.0
 
@@ -212,12 +216,14 @@ class FeatureBuilder:
         bb_upper, bb_mid, bb_lower = _bb_levels(candles, self._p.bb[0], self._p.bb[1])
         ctx = market or SymbolMarketContext()
         liq = liquidity_score(ctx.quote_volume_24h, self._p.min_quote_volume)
+        lo = self._p.atr_lo_pct[timeframe] if isinstance(self._p.atr_lo_pct, dict) else self._p.atr_lo_pct
+        hi = self._p.atr_hi_pct[timeframe] if isinstance(self._p.atr_hi_pct, dict) else self._p.atr_hi_pct
         return FeatureSet(
             symbol=symbol,
             timeframe=timeframe,
             trend_score=_norm_trend(m, self._p.adx_min),
             momentum_score=_norm_momentum(m),
-            volatility_score=_norm_volatility(m, self._p.atr_lo_pct, self._p.atr_hi_pct),
+            volatility_score=_norm_volatility(m, lo, hi),
             volume_score=_norm_volume(m, self._p.vol_spike_ratio),
             adx=m.adx,
             rsi=m.rsi,

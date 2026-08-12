@@ -87,6 +87,10 @@ class Database:
         self._migrate_v2()
         # v3: add timeframe column to decisions
         self._migrate_v3()
+        # v4: add outcome column to decisions
+        self._migrate_v4()
+        # v5: add 'open_unrealized_drawdown' outcome to decisions CHECK
+        self._migrate_v5()
 
     def _migrate_v2(self) -> None:
         existing = self._conn.execute(
@@ -118,6 +122,74 @@ class Database:
                 ALTER TABLE decisions ADD COLUMN timeframe TEXT NOT NULL DEFAULT '';
                 INSERT INTO schema_meta (key, value) VALUES ('schema_version', '3')
                     ON CONFLICT(key) DO UPDATE SET value='3';
+            """)
+            self._conn.commit()
+        except sqlite3.OperationalError:
+            pass
+
+    def _migrate_v4(self) -> None:
+        existing = self._conn.execute(
+            "SELECT value FROM schema_meta WHERE key='schema_version'"
+        ).fetchone()
+        if existing and int(existing["value"]) >= 4:
+            return
+        try:
+            self._conn.executescript("""
+                ALTER TABLE decisions ADD COLUMN outcome TEXT
+                    CHECK (outcome IS NULL OR outcome IN (
+                        'position_opened','drawdown_halt','slot_taken',
+                        'max_positions_reached','no_position'
+                    ));
+                INSERT INTO schema_meta (key, value) VALUES ('schema_version', '4')
+                    ON CONFLICT(key) DO UPDATE SET value='4';
+            """)
+            self._conn.commit()
+        except sqlite3.OperationalError:
+            pass
+
+    def _migrate_v5(self) -> None:
+        existing = self._conn.execute(
+            "SELECT value FROM schema_meta WHERE key='schema_version'"
+        ).fetchone()
+        if existing and int(existing["value"]) >= 5:
+            return
+        try:
+            self._conn.executescript("""
+                CREATE TABLE IF NOT EXISTS decisions_v5 (
+                    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                    ts_ms         INTEGER NOT NULL,
+                    symbol        TEXT    NOT NULL,
+                    timeframe     TEXT    NOT NULL DEFAULT '',
+                    accepted      INTEGER NOT NULL CHECK (accepted IN (0,1)),
+                    reject_reason TEXT        CHECK (reject_reason IS NULL
+                                                    OR reject_reason IN (
+                        'insufficient_liquidity','spread_too_wide','volatility_out_of_range',
+                        'low_score','low_confidence','conflicting_timeframes','in_cooldown',
+                        'position_exists','blacklisted','insufficient_data',
+                        'risk_budget_exhausted','max_positions_reached','drawdown_halt',
+                        'no_direction'
+                    )),
+                    detail        TEXT,
+                    score         REAL,
+                    signal        TEXT        CHECK (signal IS NULL OR signal IN ('BUY','SELL','HOLD')),
+                    outcome       TEXT        CHECK (outcome IS NULL OR outcome IN (
+                        'position_opened','drawdown_halt','slot_taken','max_positions_reached',
+                        'no_position','open_unrealized_drawdown'
+                    )),
+                    created_at    TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+                );
+                INSERT INTO decisions_v5 (id, ts_ms, symbol, timeframe, accepted,
+                    reject_reason, detail, score, signal, outcome, created_at)
+                SELECT id, ts_ms, symbol, timeframe, accepted,
+                    reject_reason, detail, score, signal, outcome, created_at
+                FROM decisions;
+                DROP TABLE decisions;
+                ALTER TABLE decisions_v5 RENAME TO decisions;
+                CREATE INDEX IF NOT EXISTS idx_decisions_ts        ON decisions (ts_ms);
+                CREATE INDEX IF NOT EXISTS idx_decisions_symbol_ts ON decisions (symbol, ts_ms);
+                CREATE INDEX IF NOT EXISTS idx_decisions_accepted  ON decisions (accepted);
+                INSERT INTO schema_meta (key, value) VALUES ('schema_version', '5')
+                    ON CONFLICT(key) DO UPDATE SET value='5';
             """)
             self._conn.commit()
         except sqlite3.OperationalError:
@@ -179,12 +251,18 @@ class CandleRepository:
         ).fetchone()
         return int(row["m"]) if row and row["m"] is not None else None
 
-    def latest_close(self, symbol: str) -> float | None:
-        """Latest close price for a symbol across any timeframe."""
-        row = self._db.conn.execute(
-            "SELECT close FROM candles WHERE symbol=? ORDER BY ts_ms DESC LIMIT 1",
-            (symbol,),
-        ).fetchone()
+    def latest_close(self, symbol: str, timeframe: str | None = None) -> float | None:
+        """Latest close price for a symbol, optionally for a specific timeframe."""
+        if timeframe:
+            row = self._db.conn.execute(
+                "SELECT close FROM candles WHERE symbol=? AND timeframe=? ORDER BY ts_ms DESC LIMIT 1",
+                (symbol, timeframe),
+            ).fetchone()
+        else:
+            row = self._db.conn.execute(
+                "SELECT close FROM candles WHERE symbol=? ORDER BY ts_ms DESC LIMIT 1",
+                (symbol,),
+            ).fetchone()
         return float(row["close"]) if row else None
 
     def fetch(self, symbol: str, timeframe: str, limit: int = 200) -> list[Candle]:
@@ -312,8 +390,8 @@ class DecisionRepository:
         with self._db.transaction() as conn:
             cur = conn.execute(
                 """INSERT INTO decisions
-                   (ts_ms, symbol, timeframe, accepted, reject_reason, detail, score, signal)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                   (ts_ms, symbol, timeframe, accepted, reject_reason, detail, score, signal, outcome)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     ts_ms if ts_ms is not None else int(decision.timestamp.timestamp() * 1000),
                     decision.symbol,
@@ -323,9 +401,37 @@ class DecisionRepository:
                     decision.detail,
                     decision.score,
                     decision.signal.value if decision.signal else None,
+                    decision.outcome,
                 ),
             )
             return _lastrowid(cur)
+
+    def insert_many(self, decisions: list, ts_ms: int | None = None) -> int:
+        """Bulk-insert decisions in a single transaction (backtest hot path)."""
+        if not decisions:
+            return 0
+        rows = [
+            (
+                ts_ms if ts_ms is not None else int(d.timestamp.timestamp() * 1000),
+                d.symbol,
+                d.timeframe or "",
+                1 if d.accepted else 0,
+                _reject_value(d.reason),
+                d.detail,
+                d.score,
+                d.signal.value if d.signal else None,
+                d.outcome,
+            )
+            for d in decisions
+        ]
+        with self._db.transaction() as conn:
+            conn.executemany(
+                """INSERT INTO decisions
+                   (ts_ms, symbol, timeframe, accepted, reject_reason, detail, score, signal, outcome)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                rows,
+            )
+            return len(rows)
 
     def count_recent_for_symbol(
         self,
@@ -373,8 +479,14 @@ class PositionRepository:
     def __init__(self, db: Database) -> None:
         self._db = db
 
-    def open_exists(self, symbol: str, timeframe: str | None = None) -> bool:
-        if timeframe:
+    def open_exists(self, symbol: str, timeframe: str | None = None,
+                    side: str | None = None) -> bool:
+        if timeframe and side:
+            row = self._db.conn.execute(
+                "SELECT 1 FROM positions WHERE symbol=? AND timeframe=? AND side=? AND status='open' LIMIT 1",
+                (symbol, timeframe, side),
+            ).fetchone()
+        elif timeframe:
             row = self._db.conn.execute(
                 "SELECT 1 FROM positions WHERE symbol=? AND timeframe=? AND status='open' LIMIT 1",
                 (symbol, timeframe),

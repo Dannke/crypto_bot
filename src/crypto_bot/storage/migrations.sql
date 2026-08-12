@@ -69,6 +69,10 @@ CREATE TABLE IF NOT EXISTS decisions (
     detail        TEXT,
     score         REAL,
     signal        TEXT        CHECK (signal IS NULL OR signal IN ('BUY','SELL','HOLD')),
+    outcome       TEXT        CHECK (outcome IS NULL OR outcome IN (
+        'position_opened','drawdown_halt','slot_taken','max_positions_reached',
+        'no_position','open_unrealized_drawdown'
+    )),
     created_at    TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
 );
 
@@ -88,7 +92,7 @@ CREATE TABLE IF NOT EXISTS positions (
     take          REAL    NOT NULL,
     status        TEXT    NOT NULL DEFAULT 'open'
                   CHECK (status IN ('proposed','open','closed','rejected','cancelled')),
-    closed_by     TEXT        CHECK (closed_by IS NULL OR closed_by IN ('stop_loss','take_profit','manual','signal')),
+    closed_by     TEXT        CHECK (closed_by IS NULL OR closed_by IN ('stop_loss','take_profit','manual','signal','emergency_drawdown')),
     opened_at_ms  INTEGER NOT NULL,
     closed_at_ms  INTEGER,
     exit_price    REAL,
@@ -139,5 +143,5 @@ CREATE INDEX IF NOT EXISTS idx_equity_ts ON equity (ts_ms);
 CREATE INDEX IF NOT EXISTS idx_positions_symbol_tf_status ON positions (symbol, timeframe, status);
 
 -- ---- schema version ---------------------------------------------------------
-INSERT INTO schema_meta (key, value) VALUES ('schema_version', '3')
+INSERT INTO schema_meta (key, value) VALUES ('schema_version', '5')
     ON CONFLICT(key) DO NOTHING;

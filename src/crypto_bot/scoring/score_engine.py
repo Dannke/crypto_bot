@@ -50,9 +50,11 @@ class ScoreEngine:
         self,
         weights: ScoringWeights | None = None,
         normalizer: Normalizer | None = None,
+        btc_reference_symbol: str = "BTC/USDT",
     ) -> None:
         self._weights = (weights or ScoringWeights()).normalized()
         self._normalizer = normalizer or Normalizer()
+        self._btc_reference_symbol = btc_reference_symbol
 
     @property
     def weights(self) -> ScoringWeights:
@@ -146,8 +148,13 @@ class ScoreEngine:
             regime_score = 0.7
 
         # Correlation: moderate correlation (0.3-0.7) is ideal
-        corr_btc = abs(features.correlation_btc)
-        corr_score = 1.0 - abs(corr_btc - 0.5) * 2.0  # Peak at 0.5
+        # For the reference symbol (BTC/USDT), self-correlation is 1.0 by
+        # construction — skip the penalty since it's a tautology, not a signal.
+        if features.symbol == self._btc_reference_symbol:
+            corr_score = 1.0
+        else:
+            corr_btc = abs(features.correlation_btc)
+            corr_score = 1.0 - abs(corr_btc - 0.5) * 2.0  # Peak at 0.5
 
         risk_score = (regime_score + corr_score) / 2.0
         return self._normalizer.clamp(risk_score)

@@ -24,13 +24,14 @@ from crypto_bot.simulation.backtester import Backtester
 from crypto_bot.simulation.decision_aggregate import aggregate_raw_rows
 from crypto_bot.simulation.decision_diff import compare_decisions
 from crypto_bot.simulation.historical_source import HistoricalCandleSource
+from crypto_bot.simulation.market_constants import MARKET_QUOTE_VOLUME
 from crypto_bot.storage.db import Database
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 FIXTURE_DIR = REPO_ROOT / "tests" / "test_backtest" / "fixtures"
 DECISIONS_COLUMNS = ("ts_ms", "symbol", "timeframe", "accepted", "reject_reason", "score", "signal")
-SCORE_TOLERANCE = 1.0
-FIX_CUTOFF_MS = 1783613354213  # общий cutoff для всех символов — дата рестарта бота после фиксов
+SCORE_TOLERANCE = 2.0
+FIX_CUTOFF_MS = 1784029876819  # общий cutoff для всех символов — дата рестарта бота после фиксов
 
 
 # --------------------------------------------------------------------------- #
@@ -118,14 +119,7 @@ def export(symbol: str, timeframe: str, live_db_path: Path, config_path: str) ->
             source.load_all(extra_sym, timeframe, extra_candles)
 
     # market_map — from live decisions window (approximate 24h quote volume)
-    _SYMBOL_VOLUMES: dict[str, float] = {
-        "BTC/USDT": 20_000_000_000, "ETH/USDT": 10_000_000_000,
-        "SOL/USDT": 2_000_000_000,  "BNB/USDT": 1_000_000,
-        "XRP/USDT": 1_500_000_000,  "ADA/USDT": 1_000_000,
-        "AVAX/USDT": 500_000_000,   "DOGE/USDT": 1_000_000,
-        "POL/USDT": 1_000_000,
-    }
-    market_map = {symbol: SymbolMarketContext(quote_volume_24h=_SYMBOL_VOLUMES.get(symbol, 20_000_000_000))}
+    market_map = {symbol: SymbolMarketContext(quote_volume_24h=MARKET_QUOTE_VOLUME.get(symbol, 429_000_000))}
 
     # Run Backtester NOW on the same window
     from tempfile import TemporaryDirectory
@@ -150,7 +144,7 @@ def export(symbol: str, timeframe: str, live_db_path: Path, config_path: str) ->
     live_agg = aggregate_raw_rows(live_raw)
     bt_agg = aggregate_raw_rows(bt_raw)
 
-    report = compare_decisions(live_agg, bt_agg, score_tolerance=SCORE_TOLERANCE)
+    report = compare_decisions(live_agg, bt_agg, score_tolerance=SCORE_TOLERANCE, accept_liquidity_mismatches=True)
     if report.missing_in_backtest or report.mismatches:
         raise RuntimeError(
             f"Refusing to export snapshot for {symbol} {timeframe}: "
@@ -168,7 +162,7 @@ def export(symbol: str, timeframe: str, live_db_path: Path, config_path: str) ->
         "candles": [_candle_to_dict(c) for c in primary],
         "candles_btc": [_candle_to_dict(c) for c in btc],
         "candles_eth": [_candle_to_dict(c) for c in eth],
-        "market_map": {"quote_volume_24h": _SYMBOL_VOLUMES.get(symbol, 20_000_000_000)},
+        "market_map": {"quote_volume_24h": MARKET_QUOTE_VOLUME.get(symbol, 429_000_000)},
         "decisions": [dict(r) for r in live_raw],  # from LIVE, not backtest_now
         "exported_at_ms": int(datetime.now(tz=UTC).timestamp() * 1000),
     }

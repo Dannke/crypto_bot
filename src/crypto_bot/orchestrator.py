@@ -207,6 +207,33 @@ async def run_orchestrator(config: Config) -> None:
                         for report in result["rejected"]:
                             executor.handle_rejected(_normalize_rejected(report))
 
+                        # ---- record MTM equity (paper mode) ----
+                        if is_paper:
+                            current_prices: dict[tuple[str, str], float] = {}
+                            for pos in executor.tracker.positions:
+                                if not pos.is_open:
+                                    continue
+                                price = (
+                                    tickers.get(pos.symbol, {}).get("last")
+                                    if tickers else None
+                                )
+                                if price is None or price <= 0:
+                                    for sf in feeds:
+                                        if sf.symbol != pos.symbol:
+                                            continue
+                                        candles = sf.by_timeframe.get(pos.timeframe, [])
+                                        if candles:
+                                            price = candles[-1].close
+                                        break
+                                if price is not None and price > 0:
+                                    current_prices[(pos.symbol, pos.timeframe)] = price
+                            equity_now = executor.tracker.mark_to_market_equity(current_prices)
+                            executor.tracker.record_equity(datetime.now(tz=UTC), equity_now)
+                            repos.equity.insert(
+                                currency=quote, equity=equity_now,
+                                drawdown_pct=None, mode=Mode.PAPER, ts_ms=int(time.time() * 1000),
+                            )
+
                     # ---- start background tick loop after first anchor ----
                     if is_paper and sim_task is None and price_sim.tracked_symbols():
                         logger.info(

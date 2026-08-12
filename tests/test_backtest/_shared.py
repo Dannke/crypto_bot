@@ -161,6 +161,7 @@ def golden_config() -> Config:
         risk__max_open_positions=5,
         risk__max_daily_drawdown_pct=20.0,
         risk__emergency_drawdown_pct=30.0,
+        risk__max_open_unrealized_drawdown_pct=20.0,
     )
     env = _make_env(crypto_bot_mode=Mode.PAPER)
     return Config(settings=settings, env=env)

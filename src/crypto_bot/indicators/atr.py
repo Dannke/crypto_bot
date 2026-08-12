@@ -1,82 +1,89 @@
-"""Average True Range (Wilder) and ATR as a percentage of price.
+"""Average Directional Index (Wilder) — trend strength, not direction.
 
-ATR% is the volatility gate: coins below ``atr_min_pct`` are too dead to trade,
-those above ``atr_max_pct`` are too explosive. Returning both absolute and
-percentage forms avoids recomputing close prices in callers.
+ADX > ~25 is generally considered a trending regime; below ~20 is choppy. The
+signal engine uses it to suppress signals in non-trending markets.
 """
 from __future__ import annotations
-
-from typing import Any
 
 import numpy as np
 import pandas as pd
 
+from ._numpy import ewm_mean
 
-def _high_low_close(
-    df_or_high: pd.DataFrame | pd.Series | np.ndarray[Any, Any],
-    low: pd.Series | np.ndarray[Any, Any] | None = None,
-    close: pd.Series | np.ndarray[Any, Any] | None = None,
-) -> tuple[pd.Series, pd.Series, pd.Series]:
+
+def _high_low_close_np(
+    high, low=None, close=None,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Accept either (high, low, close) or a DataFrame with those columns."""
-    if isinstance(df_or_high, pd.DataFrame):
+    if hasattr(high, "columns") and "high" in high:
         return (
-            pd.Series(df_or_high["high"], dtype="float64").reset_index(drop=True),
-            pd.Series(df_or_high["low"], dtype="float64").reset_index(drop=True),
-            pd.Series(df_or_high["close"], dtype="float64").reset_index(drop=True),
+            np.asarray(high["high"], dtype="float64"),
+            np.asarray(high["low"], dtype="float64"),
+            np.asarray(high["close"], dtype="float64"),
         )
     if low is None or close is None:
         raise TypeError("pass either a DataFrame or (high, low, close)")
     return (
-        pd.Series(df_or_high, dtype="float64").reset_index(drop=True),
-        pd.Series(low, dtype="float64").reset_index(drop=True),
-        pd.Series(close, dtype="float64").reset_index(drop=True),
+        np.asarray(high, dtype="float64"),
+        np.asarray(low, dtype="float64"),
+        np.asarray(close, dtype="float64"),
     )
 
 
 def true_range(
-    high: pd.DataFrame | pd.Series | np.ndarray[Any, Any],
-    low: pd.Series | np.ndarray[Any, Any] | None = None,
-    close: pd.Series | np.ndarray[Any, Any] | None = None,
+    high: pd.DataFrame | pd.Series | np.ndarray,
+    low: pd.Series | np.ndarray | None = None,
+    close: pd.Series | np.ndarray | None = None,
 ) -> pd.Series:
     """True Range series. The first bar has only H-L (no previous close)."""
-    h, low_s, c = _high_low_close(high, low, close)
-    prev_close = c.shift(1)
-    tr = pd.concat(
-        [(h - low_s).abs(), (h - prev_close).abs(), (low_s - prev_close).abs()],
-        axis=1,
-    ).max(axis=1)
-    return tr
+    return pd.Series(true_range_np(high, low, close))
+
+
+def true_range_np(high, low=None, close=None) -> np.ndarray:
+    h, low_s, c = _high_low_close_np(high, low, close)
+    prev_close = np.concatenate(([np.nan], c[:-1]))
+    return np.fmax.reduce(
+        [np.abs(h - low_s), np.abs(h - prev_close), np.abs(low_s - prev_close)]
+    )
 
 
 def atr(
-    high: pd.DataFrame | pd.Series | np.ndarray[Any, Any],
-    low: pd.Series | np.ndarray[Any, Any] | None = None,
-    close: pd.Series | np.ndarray[Any, Any] | None = None,
+    high: pd.DataFrame | pd.Series | np.ndarray,
+    low: pd.Series | np.ndarray | None = None,
+    close: pd.Series | np.ndarray | None = None,
     period: int = 14,
 ) -> pd.Series:
     """Wilder-smoothed ATR series."""
     if period < 1:
         raise ValueError("ATR period must be >= 1")
-    tr = true_range(high, low, close)
-    return tr.ewm(alpha=1 / period, adjust=False, min_periods=period).mean()
+    return pd.Series(atr_np(high, low, close, period))
+
+
+def atr_np(high, low=None, close=None, period: int = 14) -> np.ndarray:
+    tr = true_range_np(high, low, close)
+    return ewm_mean(tr, 1.0 / period, period)
 
 
 def atr_pct(
-    high: pd.DataFrame | pd.Series | np.ndarray[Any, Any],
-    low: pd.Series | np.ndarray[Any, Any] | None = None,
-    close: pd.Series | np.ndarray[Any, Any] | None = None,
+    high: pd.DataFrame | pd.Series | np.ndarray,
+    low: pd.Series | np.ndarray | None = None,
+    close: pd.Series | np.ndarray | None = None,
     period: int = 14,
 ) -> pd.Series:
     """ATR as a percentage of close (x100), handy for the volatility gate."""
-    a = atr(high, low, close, period)
-    c = _high_low_close(high, low, close)[2]
+    return pd.Series(atr_pct_np(high, low, close, period))
+
+
+def atr_pct_np(high, low=None, close=None, period: int = 14) -> np.ndarray:
+    a = atr_np(high, low, close, period)
+    c = _high_low_close_np(high, low, close)[2]
     return (a / c) * 100.0
 
 
 def last_atr_pct(
-    high: pd.DataFrame | pd.Series | np.ndarray[Any, Any],
-    low: pd.Series | np.ndarray[Any, Any] | None = None,
-    close: pd.Series | np.ndarray[Any, Any] | None = None,
+    high: pd.DataFrame | pd.Series | np.ndarray,
+    low: pd.Series | np.ndarray | None = None,
+    close: pd.Series | np.ndarray | None = None,
     period: int = 14,
 ) -> float:
     """Convenience: latest ATR%, or NaN if not enough data."""

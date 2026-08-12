@@ -28,9 +28,9 @@ class StrategyContext:
     adx_min: float
     rsi_long: tuple[float, float]
     rsi_short: tuple[float, float]
-    atr_min_pct: float
-    atr_max_pct: float
-    take_profit_risk_multiple: float
+    atr_min_pct: float | dict[str, float]
+    atr_max_pct: float | dict[str, float]
+    take_profit_risk_multiple: float | dict[str, float]
     max_stop_distance_pct: float = 3.0
     raw: dict[str, Any] | None = None
 

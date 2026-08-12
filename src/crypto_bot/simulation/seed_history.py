@@ -63,7 +63,7 @@ async def _run(
     total = 0
     since = start_ms
 
-    async with MarketDataClient(config, set_credentials=False) as client:
+    async with MarketDataClient(config) as client:
         while since < end_ms:
             raw = await client.fetch_ohlcv(symbol, timeframe, limit=limit, since=since)
             if not raw:

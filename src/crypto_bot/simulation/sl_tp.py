@@ -41,6 +41,7 @@ class SLTPCalculator:
         entry_price: float,
         side,
         atr_pct: float,
+        reward_risk_ratio: float | None = None,
     ) -> SLTPLevels:
         """Calculate SL/TP levels for a position.
 
@@ -48,6 +49,7 @@ class SLTPCalculator:
             entry_price: The entry price of the position.
             side: LONG or SHORT.
             atr_pct: ATR as a percentage of price.
+            reward_risk_ratio: Optional per-call override of the instance default.
 
         Returns:
             SLTPLevels with calculated stop-loss and take-profit.
@@ -57,7 +59,8 @@ class SLTPCalculator:
         stop_distance_pct = max(0.1, atr_distance_pct)  # minimum 0.1%
 
         # Calculate take-profit distance based on reward:risk ratio
-        take_distance_pct = stop_distance_pct * self._reward_risk_ratio
+        ratio = reward_risk_ratio if reward_risk_ratio is not None else self._reward_risk_ratio
+        take_distance_pct = stop_distance_pct * ratio
 
         # Calculate absolute levels
         if side.value == "LONG":
@@ -72,7 +75,7 @@ class SLTPCalculator:
             take_profit=round(take_profit, 8),
             stop_distance_pct=round(stop_distance_pct, 4),
             take_distance_pct=round(take_distance_pct, 4),
-            reward_risk_ratio=self._reward_risk_ratio,
+            reward_risk_ratio=ratio,
         )
 
     def calculate_fixed(

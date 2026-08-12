@@ -180,3 +180,4 @@ class DecisionRecord:
     timeframe: str = ""
     score: float | None = None
     signal: Signal | None = None
+    outcome: str | None = None    # ExecutorOutcome value (set by executor)

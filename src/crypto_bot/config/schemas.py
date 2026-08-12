@@ -73,15 +73,25 @@ class MomentumParams(StrictConfigModel):
 
 class VolatilityParams(StrictConfigModel):
     atr_period: int = Field(default=14, ge=1)
-    atr_min_pct: float = Field(default=0.5, ge=0.0)
-    atr_max_pct: float = Field(default=8.0, ge=0.0)
+    atr_min_pct: float | dict[str, float] = Field(default=0.5)
+    atr_max_pct: float | dict[str, float] = Field(default=8.0)
     bb_period: int = Field(default=20, ge=1)
     bb_std: float = Field(default=2.0, ge=0.1)
 
     @model_validator(mode="after")
     def _atr_band(self) -> VolatilityParams:
-        if self.atr_min_pct >= self.atr_max_pct:
-            raise ValueError("require atr_min_pct < atr_max_pct")
+        mins = self.atr_min_pct
+        maxs = self.atr_max_pct
+        if isinstance(mins, dict) and isinstance(maxs, dict):
+            for tf in mins:
+                mx = maxs.get(tf, 8.0)
+                if mins[tf] >= mx:
+                    raise ValueError(f"require atr_min_pct < atr_max_pct for {tf}")
+        elif isinstance(mins, (int, float)) and isinstance(maxs, (int, float)):
+            if mins >= maxs:
+                raise ValueError("require atr_min_pct < atr_max_pct")
+        else:
+            raise ValueError("atr_min_pct and atr_max_pct must be same type (both scalar or both dict)")
         return self
 
 
@@ -157,11 +167,12 @@ class FilterParams(StrictConfigModel):
 class RiskParams(StrictConfigModel):
     equity_currency: str = "USDT"
     risk_per_trade_pct: float = Field(default=1.0, gt=0.0, le=5.0)
-    take_profit_risk_multiple: float = Field(default=2.0, ge=1.0)
+    take_profit_risk_multiple: float | dict[str, float] = Field(default=2.0)
     max_stop_distance_pct: float = Field(default=3.0, gt=0.0, le=20.0)
     max_open_positions: int = Field(default=5, ge=1)
     max_daily_drawdown_pct: float = Field(default=3.0, gt=0.0, le=100.0)
     emergency_drawdown_pct: float = Field(default=6.0, gt=0.0, le=100.0)
+    max_open_unrealized_drawdown_pct: float = Field(default=3.0, ge=0.0, le=100.0)
 
     @model_validator(mode="after")
     def _drawdown_ladder(self) -> RiskParams:

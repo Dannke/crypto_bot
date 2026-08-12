@@ -8,7 +8,8 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from .atr import _high_low_close
+from ._numpy import ewm_mean
+from .atr import _high_low_close_np, true_range_np
 
 
 def adx(
@@ -24,32 +25,28 @@ def adx(
     """
     if period < 1:
         raise ValueError("ADX period must be >= 1")
-    h, low_s, c = _high_low_close(high, low, close)
+    h, low_s, c = _high_low_close_np(high, low, close)
     if len(c) < 2 * period + 1:
         return pd.Series(np.full(len(c), np.nan))
 
-    up = h.diff()
-    down = -low_s.diff()
+    up = np.diff(h, prepend=np.nan)
+    down = -np.diff(low_s, prepend=np.nan)
     # +DM: up move exceeds down move AND is positive; else 0
-    plus_dm = pd.Series(np.where((up > down) & (up > 0), up, 0.0), dtype="float64")
-    minus_dm = pd.Series(np.where((down > up) & (down > 0), down, 0.0), dtype="float64")
+    plus_dm = np.where((up > down) & (up > 0), up, 0.0)
+    minus_dm = np.where((down > up) & (down > 0), down, 0.0)
 
-    tr = (h - low_s).abs()
-    prev_close = c.shift(1)
-    tr = pd.concat(
-        [tr, (h - prev_close).abs(), (low_s - prev_close).abs()], axis=1
-    ).max(axis=1)
+    tr = true_range_np(h, low_s, c)
 
-    atr_ = tr.ewm(alpha=1 / period, adjust=False, min_periods=period).mean()
-    plus_di = 100.0 * (
-        plus_dm.ewm(alpha=1 / period, adjust=False, min_periods=period).mean() / atr_
-    )
-    minus_di = 100.0 * (
-        minus_dm.ewm(alpha=1 / period, adjust=False, min_periods=period).mean() / atr_
-    )
-    dx = 100.0 * (plus_di - minus_di).abs() / (plus_di + minus_di).replace(0.0, np.nan)
-    adx_series = dx.ewm(alpha=1 / period, adjust=False, min_periods=period).mean()
-    return adx_series
+    alpha = 1.0 / period
+    atr_ = ewm_mean(tr, alpha, period)
+    p_dm_ema = ewm_mean(plus_dm, alpha, period)
+    m_dm_ema = ewm_mean(minus_dm, alpha, period)
+    plus_di = 100.0 * p_dm_ema / atr_
+    minus_di = 100.0 * m_dm_ema / atr_
+    di_sum = plus_di + minus_di
+    dx = np.where(di_sum == 0.0, np.nan, 100.0 * np.abs(plus_di - minus_di) / di_sum)
+    adx_series = ewm_mean(dx, alpha, period)
+    return pd.Series(adx_series)
 
 
 def last_adx(

@@ -125,7 +125,8 @@ def build_candidate_builder(
 ) -> CandidateBuilder:
     """Wire filters and score engine into a ``CandidateBuilder``."""
     weights = scoring_weights_from_settings(settings)
-    score_engine = ScoreEngine(weights=weights)
+    btc_sym = f"BTC/{settings.universe.quote}"
+    score_engine = ScoreEngine(weights=weights, btc_reference_symbol=btc_sym)
     filters = build_filters(settings, last_trade_time=last_trade_time)
     return CandidateBuilder(filters=filters, score_engine=score_engine)
 

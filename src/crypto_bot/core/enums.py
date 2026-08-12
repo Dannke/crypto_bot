@@ -79,3 +79,14 @@ class RejectReason(StrEnum):
     MAX_POSITIONS_REACHED = "max_positions_reached"
     DRAWDOWN_HALT = "drawdown_halt"
     NO_DIRECTION = "no_direction"
+
+
+class ExecutorOutcome(StrEnum):
+    """Final verdict of SignalExecutor on a pipeline-selected candidate."""
+
+    POSITION_OPENED = "position_opened"
+    DRAWDOWN_HALT = "drawdown_halt"
+    SLOT_TAKEN = "slot_taken"
+    MAX_POSITIONS_REACHED = "max_positions_reached"
+    OPEN_UNREALIZED_DRAWDOWN = "open_unrealized_drawdown"
+    NO_POSITION = "no_position"  # signal_only mode

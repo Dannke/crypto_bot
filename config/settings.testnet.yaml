@@ -88,7 +88,7 @@ filters:
 risk:
   equity_currency: USDT
   risk_per_trade_pct: 1.0
-  take_profit_risk_multiple: 2.0
+  take_profit_risk_multiple: 2.0   # scalar — same for all active TFs
   max_stop_distance_pct: 3.0
   max_open_positions: 5
   max_daily_drawdown_pct: 3.0
