@@ -62,6 +62,46 @@ class TradeStatus(StrEnum):
     CANCELLED = "cancelled"   # proposed but then withdrawn before fill
 
 
+class StrategyType(StrEnum):
+    """The decision layer at which a strategy operates."""
+
+    CANDIDATE = "candidate"
+    PORTFOLIO = "portfolio"
+
+
+class MarketRegime(StrEnum):
+    """Market regime classification for regime-aware strategies.
+
+    Two-axis classification:
+    - Axis 1 (trend vs range): ADX-based trend strength
+    - Axis 2 (vol regime): Rolling percentile of realized volatility/ATR%
+
+    Values are lower_snake_case strings.
+    """
+
+    TREND_LOW_VOL = "trend_low_vol"
+    TREND_HIGH_VOL = "trend_high_vol"
+    RANGE_LOW_VOL = "range_low_vol"
+    RANGE_HIGH_VOL = "range_high_vol"
+
+
+class PortfolioRejectReason(StrEnum):
+    """Why a portfolio position intent was rejected by the risk engine.
+
+    Kept distinct from :class:`RejectReason` (candidate-level vocabulary);
+    a portfolio-level rejection maps onto one of these values when a
+    ``DecisionReport`` is produced downstream.
+    """
+
+    REJECT_MAX_POSITIONS = "REJECT_MAX_POSITIONS"
+    REJECT_MAX_POSITION_WEIGHT = "REJECT_MAX_POSITION_WEIGHT"
+    REJECT_MAX_GROSS_EXPOSURE = "REJECT_MAX_GROSS_EXPOSURE"
+    REJECT_MAX_NET_EXPOSURE = "REJECT_MAX_NET_EXPOSURE"
+    REJECT_MAX_LEVERAGE = "REJECT_MAX_LEVERAGE"
+    REJECT_MIN_NOTIONAL = "REJECT_MIN_NOTIONAL"
+    REJECT_CORRELATION = "REJECT_CORRELATION"
+
+
 class RejectReason(StrEnum):
     """Why a candidate was excluded. Recorded in the decision journal."""
 

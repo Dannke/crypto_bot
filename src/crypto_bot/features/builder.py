@@ -19,7 +19,17 @@ import pandas as pd
 
 from ..core.exceptions import InsufficientDataError
 from ..core.types import Candle, FeatureSet
-from ..indicators import adx, atr_pct, bollinger_position, ema_cross_state, rsi, volume_spike_ratio
+from ..indicators import (
+    adx,
+    atr_pct,
+    bollinger_position,
+    classify_regime_from_signals,
+    ema_cross_state,
+    regime_trend_strength,
+    rolling_atr_percentile,
+    rsi,
+    volume_spike_ratio,
+)
 from ..indicators.bollinger import bollinger_bands
 from .context import SymbolMarketContext, liquidity_score
 
@@ -189,6 +199,11 @@ class FeatureBuilderParams:
     atr_hi_pct: float | dict[str, float]
     vol_spike_ratio: float
     min_quote_volume: float = 5_000_000.0
+    # Regime parameters (R1)
+    regime_adx_period: int = 14
+    regime_adx_threshold: float = 25.0
+    regime_vol_lookback_bars: int = 168
+    regime_vol_threshold: float = 0.75
 
 
 class FeatureBuilder:
@@ -218,6 +233,32 @@ class FeatureBuilder:
         liq = liquidity_score(ctx.quote_volume_24h, self._p.min_quote_volume)
         lo = self._p.atr_lo_pct[timeframe] if isinstance(self._p.atr_lo_pct, dict) else self._p.atr_lo_pct
         hi = self._p.atr_hi_pct[timeframe] if isinstance(self._p.atr_hi_pct, dict) else self._p.atr_hi_pct
+
+        # R1: Compute regime indicators
+        _, high, low, close, _ = _arrays(candles)
+        # Regime trend strength from ADX
+        trend_strength_series = regime_trend_strength(
+            high, low, close,
+            period=self._p.regime_adx_period,
+            threshold=self._p.regime_adx_threshold,
+        )
+        _ts_last = trend_strength_series.iloc[-1] if len(trend_strength_series) else np.nan
+        trend_strength_val = float(_ts_last) if not np.isnan(_ts_last) else 0.0
+        # Regime vol percentile from rolling ATR%
+        vol_percentile_series = rolling_atr_percentile(
+            high, low, close,
+            lookback_bars=self._p.regime_vol_lookback_bars,
+            period=self._p.atr_period,
+        )
+        _vp_last = vol_percentile_series.iloc[-1] if len(vol_percentile_series) else np.nan
+        vol_percentile_val = float(_vp_last) if not np.isnan(_vp_last) else 0.5
+        # Classify regime
+        regime = classify_regime_from_signals(
+            trend_strength_val,
+            vol_percentile_val,
+            vol_threshold=self._p.regime_vol_threshold,
+        )
+
         return FeatureSet(
             symbol=symbol,
             timeframe=timeframe,
@@ -240,7 +281,9 @@ class FeatureBuilder:
             spread_pct=ctx.spread_pct,
             correlation_btc=correlation_btc,
             correlation_eth=correlation_eth,
-            market_regime=_infer_market_regime(m, self._p.adx_min),
+            market_regime=regime,
+            regime_trend_strength=trend_strength_val,
+            regime_vol_percentile=vol_percentile_val,
             open=last.open,
             high=last.high,
             low=last.low,
@@ -309,6 +352,7 @@ def builder_from_settings(settings: Any) -> FeatureBuilder:
     """
     s = settings
     strat = s.strategy
+    reg = s.regime
     params = FeatureBuilderParams(
         ema=(strat.trend.ema_fast, strat.trend.ema_mid, strat.trend.ema_slow),
         rsi_period=strat.momentum.rsi_period,
@@ -320,5 +364,10 @@ def builder_from_settings(settings: Any) -> FeatureBuilder:
         atr_hi_pct=strat.volatility.atr_max_pct,
         vol_spike_ratio=strat.volume.spike_ratio,
         min_quote_volume=s.filters.min_quote_volume_usd,
+        # Regime parameters (R1)
+        regime_adx_period=reg.trend_period,
+        regime_adx_threshold=reg.trend_threshold,
+        regime_vol_lookback_bars=reg.vol_lookback_bars,
+        regime_vol_threshold=reg.vol_percentile_high,
     )
     return FeatureBuilder(params)

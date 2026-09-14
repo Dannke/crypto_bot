@@ -92,7 +92,7 @@ CREATE TABLE IF NOT EXISTS positions (
     take          REAL    NOT NULL,
     status        TEXT    NOT NULL DEFAULT 'open'
                   CHECK (status IN ('proposed','open','closed','rejected','cancelled')),
-    closed_by     TEXT        CHECK (closed_by IS NULL OR closed_by IN ('stop_loss','take_profit','manual','signal','emergency_drawdown')),
+    closed_by     TEXT        CHECK (closed_by IS NULL OR closed_by IN ('stop_loss','take_profit','manual','signal','emergency_drawdown','rebalance','timeout_fallback')),
     opened_at_ms  INTEGER NOT NULL,
     closed_at_ms  INTEGER,
     exit_price    REAL,
@@ -105,6 +105,7 @@ CREATE TABLE IF NOT EXISTS positions (
 CREATE INDEX IF NOT EXISTS idx_positions_status_symbol ON positions (status, symbol);
 CREATE INDEX IF NOT EXISTS idx_positions_symbol_opened ON positions (symbol, opened_at_ms);
 CREATE INDEX IF NOT EXISTS idx_positions_open           ON positions (status);
+CREATE INDEX IF NOT EXISTS idx_positions_symbol_tf_status ON positions (symbol, timeframe, status);
 
 -- ---- Trades (fills/executions, linked to a position) -----------------------
 CREATE TABLE IF NOT EXISTS trades (
@@ -142,6 +143,33 @@ CREATE INDEX IF NOT EXISTS idx_equity_ts ON equity (ts_ms);
 
 CREATE INDEX IF NOT EXISTS idx_positions_symbol_tf_status ON positions (symbol, timeframe, status);
 
+-- ---- Funding rates (R0.1) ----------------------------------------------------
+CREATE TABLE IF NOT EXISTS funding_rates (
+    symbol           TEXT    NOT NULL,
+    funding_time_ms  INTEGER NOT NULL,
+    funding_rate     REAL    NOT NULL,
+    mark_price       REAL,
+    PRIMARY KEY (symbol, funding_time_ms)
+);
+
+CREATE INDEX IF NOT EXISTS idx_funding_rates_symbol_time
+    ON funding_rates (symbol, funding_time_ms);
+
+-- ---- Funding payments audit trail (R0.2) ------------------------------------
+CREATE TABLE IF NOT EXISTS funding_payments (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    position_id     INTEGER NOT NULL,
+    funding_time_ms INTEGER NOT NULL,
+    amount          REAL    NOT NULL,
+    created_at      TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+    FOREIGN KEY (position_id) REFERENCES positions(id) ON DELETE RESTRICT
+);
+
+CREATE INDEX IF NOT EXISTS idx_funding_payments_position
+    ON funding_payments (position_id);
+CREATE INDEX IF NOT EXISTS idx_funding_payments_time
+    ON funding_payments (funding_time_ms);
+
 -- ---- schema version ---------------------------------------------------------
-INSERT INTO schema_meta (key, value) VALUES ('schema_version', '5')
-    ON CONFLICT(key) DO NOTHING;
+INSERT INTO schema_meta (key, value) VALUES ('schema_version', '8')
+    ON CONFLICT(key) DO UPDATE SET value='8';

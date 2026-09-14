@@ -12,6 +12,7 @@ import click
 from crypto_bot.config.settings import load_settings
 from crypto_bot.core.exceptions import ConfigError
 from crypto_bot.orchestrator import run_orchestrator
+from crypto_bot.orchestrator_portfolio import run_portfolio_orchestrator
 from crypto_bot.storage.db import Database, Repositories
 
 # --------------------------------------------------------------------------- #
@@ -414,6 +415,30 @@ def summary(ctx, config):
     click.echo(f"{'='*60}\n")
 
     db.close()
+
+
+@cli.command()
+@click.option("--config", default=None, help="Path to settings YAML file")
+@click.pass_context
+def run_portfolio(ctx, config):
+    """Запуск portfolio-режима (cross-sectional momentum и др.)."""
+    config_path = config or ctx.obj.get("config", "config/settings.yaml")
+    try:
+        _run_portfolio(config_path)
+    except Exception as e:  # noqa: BLE001
+        click.echo(f"💥 Fatal error: {e}", err=True)
+        sys.exit(1)
+
+
+def _run_portfolio(config_path: str):
+    config_obj = load_settings(yaml_path=Path(config_path))
+    settings = config_obj.settings
+    click.echo(f"🚀 crypto_bot portfolio started in {settings.runtime.mode} mode")
+    click.echo(f"Exchange: {settings.exchange.name} (sandbox: {settings.exchange.sandbox})")
+    click.echo(f"Portfolio strategy: {settings.portfolio.strategy_name}")
+    from crypto_bot.core.validators import validate_runtime_safety
+    validate_runtime_safety(config_obj)
+    asyncio.run(run_portfolio_orchestrator(config_obj))
 
 
 @cli.command()

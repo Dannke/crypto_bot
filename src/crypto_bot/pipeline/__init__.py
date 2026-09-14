@@ -12,21 +12,25 @@ from .factory import (
     build_candidate_selector,
     build_decision_pipeline,
     build_filters,
+    build_portfolio_decision_pipeline,
     build_strategy_manager,
     build_strategy_registry,
     get_active_strategy,
     scoring_weights_from_settings,
     strategy_context_from_settings,
 )
+from .portfolio_decision_pipeline import PortfolioDecisionPipeline
 
 __all__ = [
     "CandidateBuilder",
     "CandidateSelector",
     "DecisionPipeline",
+    "PortfolioDecisionPipeline",
     "DEFAULT_STRATEGY_NAME",
     "build_candidate_builder",
     "build_candidate_selector",
     "build_decision_pipeline",
+    "build_portfolio_decision_pipeline",
     "build_filters",
     "build_strategy_manager",
     "build_strategy_registry",

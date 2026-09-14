@@ -7,11 +7,12 @@ kill-switch) is enforced by the settings loader / orchestrator, not here.
 """
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from ..core.enums import Mode
+from ..core import policy
+from ..core.enums import Mode, StrategyType
 
 
 class StrictConfigModel(BaseModel):
@@ -25,6 +26,7 @@ class RuntimeConfig(StrictConfigModel):
     loop_interval_seconds: int = Field(default=60, ge=5)
     timezone: str = "UTC"
     strategy: str = "confluence"  # "confluence" (multi-TF) or "per_timeframe" (independent per TF)
+    strategy_type: StrategyType = StrategyType.CANDIDATE
 
 
 class ExchangeConfig(StrictConfigModel):
@@ -174,6 +176,12 @@ class RiskParams(StrictConfigModel):
     emergency_drawdown_pct: float = Field(default=6.0, gt=0.0, le=100.0)
     max_open_unrealized_drawdown_pct: float = Field(default=3.0, ge=0.0, le=100.0)
 
+    # R8: Correlation and clustering risk controls
+    max_correlation: float = Field(default=0.7, ge=0.0, le=1.0)  # reject if corr > threshold
+    max_correlated_positions: int = Field(default=2, ge=1, le=10)  # max positions in same correlation cluster
+    enable_correlation_filter: bool = True
+    correlation_lookback_bars: int = Field(default=168, ge=24)  # lookback for correlation calc
+
     @model_validator(mode="after")
     def _drawdown_ladder(self) -> RiskParams:
         if self.emergency_drawdown_pct <= self.max_daily_drawdown_pct:
@@ -181,6 +189,214 @@ class RiskParams(StrictConfigModel):
                 "emergency_drawdown_pct must be greater than max_daily_drawdown_pct"
             )
         return self
+
+
+class PortfolioRiskParams(StrictConfigModel):
+    """Portfolio-level limits enforced by the risk engine."""
+
+    max_positions: int = Field(default=5, ge=1)
+    max_position_weight: float = Field(default=0.5, gt=0.0, le=1.0)
+    max_gross_exposure: float = Field(default=1.0, gt=0.0, le=3.0)
+    max_net_exposure: float = Field(default=1.0, gt=0.0, le=3.0)
+    max_leverage: float = Field(default=10.0, ge=1.0, le=100.0)
+    maintenance_margin_buffer_pct: float = Field(default=0.1, ge=0.0, le=1.0)
+
+    # R8: Correlation and clustering risk controls
+    max_correlation: float = Field(default=0.7, ge=0.0, le=1.0)  # reject if corr > threshold
+    max_correlated_positions: int = Field(default=2, ge=1, le=10)  # max positions in same correlation cluster
+    enable_correlation_filter: bool = True
+    correlation_lookback_bars: int = Field(default=168, ge=24)  # lookback for correlation calc
+
+
+class CsmConfig(StrictConfigModel):
+    """Cross-sectional momentum (CSM) strategy parameters.
+
+    Mirrors the CSM contract: one timeframe, one or more duration lookbacks
+    (e.g. ``["24h", "72h", "168h"]``), long/short percentile cutoffs, an
+    equal-weighting policy, and a rebalance cadence.  v0 supports only
+    ``weighting: equal``; ML, regime, OI, funding and order-book inputs are
+    out of scope and rejected structurally.
+    """
+
+    timeframe: str = "1h"
+    lookbacks: list[str] = Field(default_factory=lambda: ["24h"])
+    # Percentile cutoffs on the cross-sectional rank: longs are symbols in
+    # the top (1 - long_percentile), shorts in the bottom short_percentile.
+    long_percentile: float = Field(default=0.90, gt=0.0, lt=1.0)
+    # Omit / null for long-only.
+    short_percentile: float | None = Field(default=None, gt=0.0, lt=1.0)
+    weighting: Literal["equal"] = "equal"
+    rebalance_hours: int = Field(default=24, ge=1)
+    # Seed for randomised baselines (``random_baseline`` strategy) so the
+    # null model is reproducible; unused by the momentum strategies.
+    seed: int | None = Field(default=None, ge=0)
+
+    @model_validator(mode="after")
+    def _csm_sanity(self) -> CsmConfig:
+        if not policy.is_timeframe_allowed(self.timeframe):
+            raise ValueError(
+                f"csm.timeframe must be one of {policy.ALLOWED_TIMEFRAMES}, "
+                f"got {self.timeframe!r}"
+            )
+        if not self.lookbacks:
+            raise ValueError("csm.lookbacks must list at least one duration")
+        tf_seconds = policy.timeframe_to_seconds(self.timeframe)
+        for duration in self.lookbacks:
+            try:
+                seconds = policy.parse_duration_seconds(duration)
+            except ValueError as exc:
+                raise ValueError(str(exc)) from exc
+            if seconds % tf_seconds != 0:
+                raise ValueError(
+                    f"csm lookback {duration!r} is not an integer multiple of "
+                    f"csm.timeframe {self.timeframe!r}"
+                )
+        if self.short_percentile is not None and self.long_percentile <= self.short_percentile:
+            raise ValueError(
+                "csm.long_percentile must exceed csm.short_percentile"
+            )
+        return self
+
+
+class MeanReversionConfig(StrictConfigModel):
+    """Mean reversion (MR) strategy parameters.
+
+    Cross-sectional z-score of short-horizon returns on a rolling window.
+    Entry when |z| >= entry_threshold, exit on reversion (|z| <= exit_threshold)
+    or time-stop (max_holding_bars). Hourly rebalance cadence.
+    """
+
+    timeframe: str = "1h"
+    zscore_window_bars: int = Field(default=48, ge=10)
+    signal_lookback: str = "4h"
+    entry_threshold: float = Field(default=2.0, gt=0.0)
+    exit_threshold: float = Field(default=0.5, ge=0.0)
+    max_holding_bars: int = Field(default=24, ge=1)
+    weighting: Literal["equal", "inverse_vol"] = "inverse_vol"
+    rebalance_hours: int = Field(default=1, ge=1)
+    seed: int | None = Field(default=None, ge=0)
+    # Post-only execution (maker-only)
+    entry_execution: Literal["market", "post_only"] = "market"
+    exit_execution: Literal["market", "post_only"] = "market"
+    min_expected_edge_bps: int = Field(default=0, ge=0)
+
+    @model_validator(mode="after")
+    def _mr_sanity(self) -> MeanReversionConfig:
+        if not policy.is_timeframe_allowed(self.timeframe):
+            raise ValueError(
+                f"mean_reversion.timeframe must be one of {policy.ALLOWED_TIMEFRAMES}, "
+                f"got {self.timeframe!r}"
+            )
+        if self.entry_threshold <= self.exit_threshold:
+            raise ValueError(
+                "mean_reversion.entry_threshold must exceed exit_threshold"
+            )
+        tf_seconds = policy.timeframe_to_seconds(self.timeframe)
+        try:
+            signal_seconds = policy.parse_duration_seconds(self.signal_lookback)
+        except ValueError as exc:
+            raise ValueError(str(exc)) from exc
+        if signal_seconds % tf_seconds != 0:
+            raise ValueError(
+                f"mean_reversion.signal_lookback {self.signal_lookback!r} is not an "
+                f"integer multiple of timeframe {self.timeframe!r}"
+            )
+        if self.rebalance_hours * tf_seconds > signal_seconds:
+            raise ValueError(
+                "mean_reversion.rebalance_hours * timeframe must not exceed signal_lookback"
+            )
+        return self
+
+
+class RegimeConfig(StrictConfigModel):
+    """Market regime classification parameters (R1).
+
+    Two-axis regime classification:
+    - Trend vs Range: ADX-based trend strength
+    - Volatility Regime: Rolling percentile of ATR%
+    """
+
+    enabled: bool = True
+    reference: str = "universe_basket"  # or "btc_only"
+    # Trend axis
+    trend_indicator: str = "adx"
+    trend_period: int = 14
+    trend_threshold: float = 25.0
+    # Volatility axis
+    vol_lookback_bars: int = 168
+    vol_percentile_high: float = 0.75
+    # Hysteresis
+    hysteresis_min_dwell_bars: int = 6
+    # Exposure multipliers per regime
+    exposure_trend_low_vol: float = 1.0
+    exposure_trend_high_vol: float = 0.5
+    exposure_range_low_vol: float = 0.25
+    exposure_range_high_vol: float = 0.0
+    # Per-strategy overrides (Task 7)
+    strategy_overrides: dict[str, dict[str, float]] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def _regime_sanity(self) -> RegimeConfig:
+        # Trend axis
+        if self.trend_period < 1:
+            raise ValueError("regime.trend_period must be >= 1")
+        if not 0.0 < self.trend_threshold <= 100.0:
+            raise ValueError("regime.trend_threshold must be in (0, 100]")
+        if self.trend_indicator not in ("adx",):
+            raise ValueError(f"regime.trend_indicator must be 'adx', got {self.trend_indicator!r}")
+
+        # Volatility axis
+        if self.vol_lookback_bars < 2 * self.trend_period:
+            raise ValueError(
+                f"regime.vol_lookback_bars ({self.vol_lookback_bars}) must be >= 2 * trend_period ({2 * self.trend_period})"
+            )
+        if not 0.0 < self.vol_percentile_high < 1.0:
+            raise ValueError("regime.vol_percentile_high must be in (0, 1)")
+
+        # Hysteresis
+        if self.hysteresis_min_dwell_bars < 0:
+            raise ValueError("regime.hysteresis_min_dwell_bars must be >= 0")
+
+        # Exposure multipliers
+        for field_name in (
+            "exposure_trend_low_vol",
+            "exposure_trend_high_vol",
+            "exposure_range_low_vol",
+            "exposure_range_high_vol",
+        ):
+            value = getattr(self, field_name)
+            if not 0.0 <= value <= 1.0:
+                raise ValueError(f"regime.{field_name} must be in [0, 1], got {value}")
+
+        # Strategy overrides validation
+        for strat_name, overrides in self.strategy_overrides.items():
+            for key, value in overrides.items():
+                if key not in (
+                    "exposure_trend_low_vol",
+                    "exposure_trend_high_vol",
+                    "exposure_range_low_vol",
+                    "exposure_range_high_vol",
+                ):
+                    raise ValueError(f"regime.strategy_overrides.{strat_name}.{key}: unknown exposure key")
+                if not 0.0 <= value <= 1.0:
+                    raise ValueError(f"regime.strategy_overrides.{strat_name}.{key} must be in [0, 1], got {value}")
+
+        return self
+
+
+class PortfolioConfig(StrictConfigModel):
+    """Portfolio decision layer: strategy name, risk limits, volatility sizing."""
+
+    strategy_name: str = "long_only_trend"
+    volatility_sizing: bool = False
+    risk: PortfolioRiskParams = PortfolioRiskParams()
+    csm: CsmConfig = CsmConfig()
+    mean_reversion: MeanReversionConfig = MeanReversionConfig()
+
+    # R8: Rebalance scheduler persistence (persist next_rebalance_ts to SQLite)
+    rebalance_persist: bool = True
+    # R8: Separate regime recalculation cadence from rebalance cadence
+    regime_cadence_hours: int = Field(default=1, ge=1, le=24)
 
 
 # --------------------------------------------------------------------------- #
@@ -226,6 +442,8 @@ class Settings(StrictConfigModel):
     scoring: ScoringParams = ScoringParams()
     filters: FilterParams = FilterParams()
     risk: RiskParams = RiskParams()
+    portfolio: PortfolioConfig = PortfolioConfig()
+    regime: RegimeConfig = RegimeConfig()
     storage: StorageConfig = StorageConfig()
     logging: LoggingConfig = LoggingConfig()
     universe: UniverseConfig = UniverseConfig()

@@ -108,6 +108,23 @@ class PaperPosition:
         else:  # SHORT
             return current_price <= self.take_profit
 
+    def apply_funding(self, amount: float) -> None:
+        """Apply funding payment to the position's P&L.
+
+        Args:
+            amount: Funding amount (negative = cost, positive = income).
+                    This is added to pnl_abs directly.
+        """
+        if not self.is_open:
+            return
+        # Initialize pnl_abs if None (shouldn't happen but defensive)
+        if self.pnl_abs is None:
+            self.pnl_abs = 0.0
+        self.pnl_abs += amount
+        # Recalculate pnl_pct based on updated pnl_abs
+        if self.entry_price * self.size > 0:
+            self.pnl_pct = (self.pnl_abs / (self.entry_price * self.size)) * 100.0
+
     def to_dict(self) -> dict:
         """Convert position to dictionary for logging/serialization."""
         return {

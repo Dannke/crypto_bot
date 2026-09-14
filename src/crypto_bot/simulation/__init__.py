@@ -8,6 +8,7 @@ from .fees import FeeCalculator
 from .historical_source import HistoricalCandleSource
 from .paper_position import PaperPosition
 from .pnl import PnLSummary, PnLTracker
+from .portfolio_executor import PortfolioExecutionResult, PortfolioExecutor
 from .sl_tp import SLTPCalculator, SLTPLevels
 
 __all__ = [
@@ -22,6 +23,8 @@ __all__ = [
     "PaperPosition",
     "PnLSummary",
     "PnLTracker",
+    "PortfolioExecutionResult",
+    "PortfolioExecutor",
     "SLTPCalculator",
     "SLTPLevels",
     "SignalExecutor",

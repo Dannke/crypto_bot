@@ -125,6 +125,35 @@ def validate_strategy_periods(config: Config) -> None:
         )
 
 
+def validate_portfolio_csm(config: Config) -> None:
+    """CSM/MR lookback windows must fit inside the configured candle history."""
+    s = config.settings
+    if s.portfolio.strategy_name == "cross_sectional_momentum_v0":
+        csm = s.portfolio.csm
+        tf_seconds = policy.timeframe_to_seconds(csm.timeframe)
+        bars_required = max(
+            policy.parse_duration_seconds(duration) // tf_seconds
+            for duration in csm.lookbacks
+        ) + 1
+        if s.timeframes.candles_per_tf < bars_required:
+            raise ConfigError(
+                f"candles_per_tf={s.timeframes.candles_per_tf} is too small for CSM "
+                f"lookbacks {csm.lookbacks} on {csm.timeframe}; need >= {bars_required} "
+                "bars (longest lookback + 1)."
+            )
+    elif s.portfolio.strategy_name == "mean_reversion_v0":
+        mr = s.portfolio.mean_reversion
+        tf_seconds = policy.timeframe_to_seconds(mr.timeframe)
+        signal_bars = policy.parse_duration_seconds(mr.signal_lookback) // tf_seconds
+        bars_required = mr.zscore_window_bars + signal_bars + 1
+        if s.timeframes.candles_per_tf < bars_required:
+            raise ConfigError(
+                f"candles_per_tf={s.timeframes.candles_per_tf} is too small for Mean Reversion "
+                f"window={mr.zscore_window_bars} signal_lookback={mr.signal_lookback} on {mr.timeframe}; "
+                f"need >= {bars_required} bars (window + signal_lookback + 1)."
+            )
+
+
 # --------------------------------------------------------------------------- #
 # Universe
 # --------------------------------------------------------------------------- #
@@ -188,6 +217,7 @@ def validate_all(config: Config) -> None:
     """Run every validator. Raises on the first violation (fail-fast)."""
     validate_timeframes(config)
     validate_strategy_periods(config)
+    validate_portfolio_csm(config)
     validate_universe(config)
     validate_mode_compatibility(config)
     # validate_live_gate is invoked transitively when mode == LIVE.

@@ -10,10 +10,12 @@ from datetime import UTC, datetime
 from typing import Any
 
 from ..config.env import Config
-from ..core.enums import ExecutorOutcome, Mode, OrderType, RejectReason, Signal, TradeStatus
+from ..core.enums import ExecutorOutcome, Mode, OrderType, RejectReason, Side, Signal, TradeStatus
 from ..core.logging_setup import get_logger
 from ..core.types import DecisionRecord
+from ..data.funding import HistoricalFundingSource
 from ..decision.decision_report import DecisionReport
+from ..execution.costs import ExecutionCostModel
 from ..simulation.fees import FeeCalculator
 from ..simulation.paper_position import PaperPosition
 from ..simulation.pnl import PnLTracker
@@ -632,5 +634,76 @@ class SignalExecutor:
                 paper_pos.symbol, paper_pos.timeframe, paper_pos.side.value,
                 exit_price, reason, pnl,
             )
+
+        return stats
+
+    def accrue_funding(
+        self,
+        funding_source: HistoricalFundingSource,
+        bar_timestamp_ms: int,
+        cost_model: ExecutionCostModel | None = None,
+    ) -> dict[str, Any]:
+        """Accrue funding for all open positions at a bar timestamp.
+
+        Called on each bar close in backtest to apply funding payments
+        for positions held across funding timestamps.
+
+        Args:
+            funding_source: HistoricalFundingSource with loaded funding events
+            bar_timestamp_ms: Current bar close timestamp (ms epoch)
+            cost_model: Optional cost model with funding support (defaults to legacy)
+
+        Returns:
+            Dict with funding stats per symbol and total.
+        """
+        stats: dict[str, Any] = {
+            "accrued_count": 0,
+            "total_funding": 0.0,
+            "by_symbol": {},
+        }
+
+        for paper_pos in list(self._tracker.positions):
+            if not paper_pos.is_open:
+                continue
+
+            symbol = paper_pos.symbol
+            events = funding_source.events_up_to(bar_timestamp_ms, symbol)
+            if not events:
+                continue
+
+            # Filter to events that occurred since position open
+            position_opened_ms = int(paper_pos.entry_time.timestamp() * 1000)
+            relevant_events = [
+                e for e in events
+                if e.funding_time_ms > position_opened_ms and e.funding_time_ms <= bar_timestamp_ms
+            ]
+            if not relevant_events:
+                continue
+
+            # Use provided cost model or fall back to simple funding accrual
+            if cost_model and hasattr(cost_model, 'accrue_funding'):
+                funding_result = cost_model.accrue_funding(
+                    side=paper_pos.side,
+                    weight=paper_pos.size / self._tracker.current_equity * paper_pos.entry_price,
+                    entry_price=paper_pos.entry_price,
+                    funding_events=relevant_events,
+                )
+                funding_amount = funding_result.net_amount
+            else:
+                # Simple funding accrual using legacy fee calculator
+                notional = paper_pos.size * paper_pos.entry_price
+                funding_amount = 0.0
+                for event in relevant_events:
+                    if paper_pos.side == Side.LONG:
+                        funding_amount += notional * event.funding_rate
+                    else:
+                        funding_amount -= notional * event.funding_rate
+                funding_amount = -funding_amount  # negative = cost to P&L
+
+            if funding_amount != 0:
+                paper_pos.apply_funding(funding_amount)
+                stats["total_funding"] += funding_amount
+                stats["accrued_count"] += 1
+                stats["by_symbol"][symbol] = stats["by_symbol"].get(symbol, 0.0) + funding_amount
 
         return stats

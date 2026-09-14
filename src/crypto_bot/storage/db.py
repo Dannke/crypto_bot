@@ -91,6 +91,122 @@ class Database:
         self._migrate_v4()
         # v5: add 'open_unrealized_drawdown' outcome to decisions CHECK
         self._migrate_v5()
+        # v6: add funding_rates and funding_payments tables
+        self._migrate_v6()
+        # v7: add state table for scheduler persistence (R8)
+        self._migrate_v7()
+        # v8: add timeout_fallback to positions.closed_by CHECK constraint
+        self._migrate_v8()
+
+    def _migrate_v6(self) -> None:
+        existing = self._conn.execute(
+            "SELECT value FROM schema_meta WHERE key='schema_version'"
+        ).fetchone()
+        if existing and int(existing["value"]) >= 6:
+            return
+        try:
+            self._conn.executescript("""
+                CREATE TABLE IF NOT EXISTS funding_rates (
+                    symbol           TEXT    NOT NULL,
+                    funding_time_ms  INTEGER NOT NULL,
+                    funding_rate     REAL    NOT NULL,
+                    mark_price       REAL,
+                    PRIMARY KEY (symbol, funding_time_ms)
+                );
+                CREATE INDEX IF NOT EXISTS idx_funding_rates_symbol_time
+                    ON funding_rates (symbol, funding_time_ms);
+                CREATE TABLE IF NOT EXISTS funding_payments (
+                    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                    position_id     INTEGER NOT NULL,
+                    funding_time_ms INTEGER NOT NULL,
+                    amount          REAL    NOT NULL,
+                    created_at      TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+                    FOREIGN KEY (position_id) REFERENCES positions(id) ON DELETE RESTRICT
+                );
+                CREATE INDEX IF NOT EXISTS idx_funding_payments_position
+                    ON funding_payments (position_id);
+                CREATE INDEX IF NOT EXISTS idx_funding_payments_time
+                    ON funding_payments (funding_time_ms);
+                INSERT INTO schema_meta (key, value) VALUES ('schema_version', '6')
+                    ON CONFLICT(key) DO UPDATE SET value='6';
+            """)
+            self._conn.commit()
+        except sqlite3.OperationalError:
+            pass
+
+    def _migrate_v7(self) -> None:
+        existing = self._conn.execute(
+            "SELECT value FROM schema_meta WHERE key='schema_version'"
+        ).fetchone()
+        if existing and int(existing["value"]) >= 7:
+            return
+        try:
+            self._conn.executescript("""
+                CREATE TABLE IF NOT EXISTS state (
+                    key           TEXT    PRIMARY KEY,
+                    value         TEXT    NOT NULL,
+                    updated_at    INTEGER NOT NULL
+                );
+                INSERT INTO schema_meta (key, value) VALUES ('schema_version', '7')
+                    ON CONFLICT(key) DO UPDATE SET value='7';
+            """)
+            self._conn.commit()
+        except sqlite3.OperationalError:
+            pass
+
+    def _migrate_v8(self) -> None:
+        existing = self._conn.execute(
+            "SELECT value FROM schema_meta WHERE key='schema_version'"
+        ).fetchone()
+        if existing and int(existing["value"]) >= 8:
+            return
+        try:
+            # Recreate positions table with updated closed_by CHECK constraint
+            self._conn.executescript("""
+                -- Create new positions table with updated closed_by CHECK constraint
+                CREATE TABLE positions_new (
+                    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                    symbol        TEXT    NOT NULL,
+                    timeframe     TEXT    NOT NULL,
+                    side          TEXT    NOT NULL CHECK (side IN ('LONG','SHORT')),
+                    size          REAL    NOT NULL,
+                    entry_price   REAL    NOT NULL,
+                    stop          REAL    NOT NULL,
+                    take          REAL    NOT NULL,
+                    status        TEXT    NOT NULL DEFAULT 'open'
+                      CHECK (status IN ('proposed','open','closed','rejected','cancelled')),
+                    closed_by     TEXT        CHECK (closed_by IS NULL OR closed_by IN ('stop_loss','take_profit','manual','signal','emergency_drawdown','rebalance','timeout_fallback')),
+                    opened_at_ms  INTEGER NOT NULL,
+                    closed_at_ms  INTEGER,
+                    exit_price    REAL,
+                    pnl_pct       REAL,
+                    mode          TEXT    NOT NULL CHECK (mode IN ('signal_only','paper','live')),
+                    created_at    TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+                    updated_at    TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+                );
+
+                -- Copy data from old table
+                INSERT INTO positions_new (id, symbol, timeframe, side, size, entry_price, stop, take, status, closed_by, opened_at_ms, closed_at_ms, exit_price, pnl_pct, mode, created_at, updated_at)
+                SELECT id, symbol, timeframe, side, size, entry_price, stop, take, status, closed_by, opened_at_ms, closed_at_ms, exit_price, pnl_pct, mode, created_at, updated_at
+                FROM positions;
+
+                -- Drop old table and rename new
+                DROP TABLE positions;
+                ALTER TABLE positions_new RENAME TO positions;
+
+                -- Recreate indexes
+                CREATE INDEX IF NOT EXISTS idx_positions_status_symbol ON positions (status, symbol);
+                CREATE INDEX IF NOT EXISTS idx_positions_symbol_opened ON positions (symbol, opened_at_ms);
+                CREATE INDEX IF NOT EXISTS idx_positions_open ON positions (status);
+                CREATE INDEX IF NOT EXISTS idx_positions_symbol_tf_status ON positions (symbol, timeframe, status);
+
+                -- Update schema version
+                INSERT INTO schema_meta (key, value) VALUES ('schema_version', '8')
+                    ON CONFLICT(key) DO UPDATE SET value='8';
+            """)
+            self._conn.commit()
+        except sqlite3.OperationalError:
+            pass
 
     def _migrate_v2(self) -> None:
         existing = self._conn.execute(

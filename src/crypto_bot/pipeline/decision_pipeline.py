@@ -16,7 +16,7 @@ from ..decision.explanation import ExplanationGenerator
 from ..future.fusion import ClassicalOnlyFusion, FusedDecision, FusionEngine
 from ..pipeline.candidate_builder import CandidateBuilder
 from ..pipeline.candidate_selector import CandidateSelector, SelectionConfig
-from ..strategy.base import Strategy
+from ..strategy.base import CandidateStrategy
 
 
 class DecisionPipeline:
@@ -46,7 +46,7 @@ class DecisionPipeline:
     def process(
         self,
         features_by_symbol: dict[str, dict[str, FeatureSet]],
-        strategy: Strategy,
+        strategy: CandidateStrategy,
         selection_config: SelectionConfig | None = None,
         *,
         per_timeframe: bool = False,
@@ -134,7 +134,7 @@ class DecisionPipeline:
     def _process_per_timeframe(
         self,
         features_by_symbol: dict[str, dict[str, FeatureSet]],
-        strategy: Strategy,
+        strategy: CandidateStrategy,
         selection_config: SelectionConfig | None = None,
         *,
         as_of_ms: int | None = None,
@@ -193,7 +193,7 @@ class DecisionPipeline:
         self,
         symbol: str,
         features_by_tf: dict[str, FeatureSet],
-        strategy: Strategy,
+        strategy: CandidateStrategy,
         *,
         as_of_ms: int | None = None,
     ) -> DecisionReport | None:

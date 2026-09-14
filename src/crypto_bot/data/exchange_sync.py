@@ -1,8 +1,9 @@
 """Synchronous ccxt market-data client (bypasses aiodns issues on Windows)."""
 from __future__ import annotations
 
-import ccxt
 from typing import Any, Self, cast
+
+import ccxt
 
 from ..config.env import Config
 from ..core import policy

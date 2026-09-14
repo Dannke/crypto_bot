@@ -15,6 +15,8 @@ The two most important knobs:
 """
 from __future__ import annotations
 
+import re
+
 # =========================================================================== #
 # Live-trading release gate
 # =========================================================================== #
@@ -64,6 +66,33 @@ def is_bar_closed(candle_open_ts_ms: int, timeframe: str, as_of_ms: int) -> bool
     """
     period_ms = timeframe_to_seconds(timeframe) * 1000
     return candle_open_ts_ms + period_ms <= as_of_ms
+
+
+# =========================================================================== #
+# Durations (config-facing lookback windows, e.g. "24h", "72h", "168h")
+# =========================================================================== #
+_DURATION_RE = re.compile(r"^(\d+)([mhdw])$")
+_DURATION_MINUTES: dict[str, int] = {"m": 1, "h": 60, "d": 1440, "w": 10080}
+
+
+def parse_duration_seconds(value: str) -> int:
+    """Parse a duration like ``"30m"``, ``"24h"``, ``"3d"`` or ``"1w"``.
+
+    Raises ``ValueError`` for anything that is not a positive
+    ``<number><unit>`` string (calendar months are deliberately unsupported —
+    a month is not a fixed number of bars).
+    """
+    if not isinstance(value, str):
+        raise ValueError(f"duration must be a string like '24h', got {value!r}")
+    match = _DURATION_RE.match(value.strip().lower())
+    if match is None:
+        raise ValueError(
+            f"invalid duration {value!r}; use e.g. '30m', '24h', '3d', '1w'"
+        )
+    amount = int(match.group(1))
+    if amount <= 0:
+        raise ValueError(f"duration {value!r} must be positive")
+    return amount * _DURATION_MINUTES[match.group(2)] * 60
 
 
 # =========================================================================== #

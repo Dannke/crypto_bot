@@ -27,6 +27,7 @@ from ..core.logging_setup import get_logger
 from ..core.types import Candle
 from ..storage.db import CandleRepository, Database
 from .exchange import MarketDataClient
+from .instruments import InstrumentCache
 
 _log = get_logger("data.feed")
 
@@ -139,7 +140,12 @@ async def discover_symbols(client: MarketDataClient, config: Config) -> list[str
     return [symbol for _, symbol in ranked[: u.auto_discover.top_n]]
 
 
-async def resolve_symbols(client: MarketDataClient, config: Config, exchange_available: bool = True) -> list[str]:
+async def resolve_symbols(
+    client: MarketDataClient,
+    config: Config,
+    exchange_available: bool = True,
+    instrument_cache: InstrumentCache | None = None,
+) -> list[str]:
     """Merge explicit watchlist symbols with auto-discovered high-liquidity pairs.
 
     The explicit watchlist is user-curated YAML and is NOT guaranteed to match
@@ -158,6 +164,10 @@ async def resolve_symbols(client: MarketDataClient, config: Config, exchange_ava
     DNS failure, etc.) the explicit watchlist is returned as-is so the
     orchestrator can still reach ``feed.fetch_many`` which falls back to
     its DB cache for candles.
+
+    R0.4: Additionally filters by instrument specs (fail closed):
+    - Symbol must be a tradable LinearPerpetual with status 'Trading'
+    - If instrument_cache is provided, symbols without valid specs are excluded
     """
     explicit = build_symbols(config)
 
@@ -190,15 +200,38 @@ async def resolve_symbols(client: MarketDataClient, config: Config, exchange_ava
 
     discovered = [] if available is None else await discover_symbols(client, config)
 
+    # Combine explicit + discovered
+    combined: list[str] = [*explicit, *discovered]
+
+    # R0.4: Filter by instrument specs (fail closed)
+    if instrument_cache is not None:
+        before = len(combined)
+        filtered: list[str] = []
+        for sym in combined:
+            if instrument_cache.is_tradable_linear_perpetual(sym):
+                filtered.append(sym)
+            else:
+                _log.warning(
+                    "universe: %s excluded by instrument spec (not tradable LinearPerpetual or no spec)",
+                    sym,
+                )
+        combined = filtered
+        if len(combined) < before:
+            _log.info(
+                "universe: instrument spec filter removed %d symbols (%d -> %d)",
+                before - len(combined), before, len(combined),
+            )
+
+    # De-duplicate preserving order
     seen: set[str] = set()
     resolved: list[str] = []
-    for symbol in [*explicit, *discovered]:
+    for symbol in combined:
         if symbol not in seen:
             seen.add(symbol)
             resolved.append(symbol)
 
     _log.info(
-        "universe resolved: %d explicit + %d discovered = %d total (after de-dup)",
+        "universe resolved: %d explicit + %d discovered = %d total (after de-dup & instrument filter)",
         len(explicit), len(discovered), len(resolved),
     )
     return resolved

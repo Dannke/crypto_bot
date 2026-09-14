@@ -14,6 +14,11 @@ from .adx import adx, last_adx
 from .atr import atr, atr_pct, last_atr_pct, true_range
 from .bollinger import bollinger_bands, bollinger_position
 from .ema import ema, ema_cross_state
+from .regime import (
+    classify_regime_from_signals,
+    regime_trend_strength,
+    rolling_atr_percentile,
+)
 from .rsi import rsi
 from .volume import volume_ma, volume_spike_ratio
 
@@ -31,4 +36,7 @@ __all__ = [
     "rsi",
     "volume_ma",
     "volume_spike_ratio",
+    "regime_trend_strength",
+    "rolling_atr_percentile",
+    "classify_regime_from_signals",
 ]

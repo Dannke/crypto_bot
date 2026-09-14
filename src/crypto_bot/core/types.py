@@ -96,6 +96,8 @@ class FeatureSet:
 
     # Market regime
     market_regime: str = "neutral"  # "bull", "bear", "neutral", "choppy"
+    regime_trend_strength: float = 0.0  # [-1, 1] continuous trend signal from ADX
+    regime_vol_percentile: float = 0.0  # [0, 1] rolling ATR% percentile
 
     # Future ML inputs (placeholders for now)
     news_score: float = 0.0

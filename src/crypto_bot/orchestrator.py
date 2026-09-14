@@ -17,6 +17,7 @@ from .core.logging_setup import get_logger
 from .core.policy import timeframe_to_seconds
 from .data.exchange import MarketDataClient
 from .data.feed import Feed, resolve_symbols
+from .data.instruments import build_instrument_cache
 from .decision.decision_report import DecisionReport
 from .features.batch import build_features_batch
 from .features.builder import builder_from_settings
@@ -52,6 +53,9 @@ async def run_orchestrator(config: Config) -> None:
     strategy_name = getattr(settings.runtime, "strategy", "confluence")
     per_timeframe_mode = strategy_name == "per_timeframe"
     logger.info("Strategy: %s%s", strategy_name, " (per-timeframe)" if per_timeframe_mode else "")
+
+    # R0.4: Build instrument cache (with disk persistence and TTL)
+    instrument_cache = await build_instrument_cache(config)
 
     db = Database(settings.storage.db_path)
     repos = Repositories(db)
@@ -97,7 +101,7 @@ async def run_orchestrator(config: Config) -> None:
                 try:
                     t0 = time.time()
                     logger.info("--- scan cycle starts ---")
-                    symbols = await resolve_symbols(client, config, feed.exchange_available)
+                    symbols = await resolve_symbols(client, config, feed.exchange_available, instrument_cache)
                     t1 = time.time()
                     if not symbols:
                         logger.warning("Universe is empty; skipping cycle")

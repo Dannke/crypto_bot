@@ -1,26 +1,18 @@
-"""Strategy base contract.
-
-Defines the common interface every strategy variant will implement, plus a
-``StrategyContext`` — the read-only bundle of strategy parameters a strategy
-needs. Keeping this abstract means we can add alternative strategies later
-without touching the orchestrator.
-"""
+"""Strategy interfaces and shared candidate-strategy configuration."""
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Any
 
-from ..core.types import FeatureSet
+from ..core.types import FeatureSet, SignalResult
+from ..portfolio.market_snapshot import MarketSnapshot
+from ..portfolio.models import CrossSectionalFeatureSnapshot, PortfolioIntent, PortfolioState
 
 
 @dataclass(frozen=True, slots=True)
 class StrategyContext:
-    """Resolved, read-only strategy parameters handed to a strategy.
-
-    Decoupling the raw ``Settings`` from what a strategy reads keeps the
-    strategy layer independent of the config schema's evolution.
-    """
+    """Resolved, read-only parameters passed to a candidate strategy."""
 
     scoring_weights: dict[str, float]
     min_score: float
@@ -35,14 +27,54 @@ class StrategyContext:
     raw: dict[str, Any] | None = None
 
 
-class Strategy(ABC):
-    """A strategy evaluates feature sets and produces directional signals.
-
-    The only contract a strategy must fulfil is ``evaluate`` — it returns a
-    ``SignalResult`` (BUY/SELL/HOLD per symbol).  Scoring is handled by
-    ``ScoreEngine`` in the pipeline, not by the strategy itself.
-    """
+class CandidateStrategy(ABC):
+    """Evaluate one symbol's multi-timeframe features into a signal."""
 
     @abstractmethod
-    def evaluate(self, symbol: str, features_by_tf: dict[str, FeatureSet]) -> Any:
-        """Produce a directional signal from multi-timeframe features."""
+    def evaluate(self, symbol: str, features_by_tf: dict[str, FeatureSet]) -> SignalResult:
+        """Produce a BUY, SELL, or HOLD result for one candidate."""
+
+
+class PortfolioStrategy(ABC):
+    """Evaluate the cross-section and state into a target portfolio intent."""
+
+    @abstractmethod
+    def evaluate(
+        self,
+        features: CrossSectionalFeatureSnapshot,
+        state: PortfolioState,
+    ) -> PortfolioIntent:
+        """Produce an intent only; execution belongs to a downstream service."""
+
+    def evaluate_market(
+        self,
+        snapshot: MarketSnapshot,
+        state: PortfolioState,
+    ) -> PortfolioIntent:
+        """Evaluate a raw market snapshot (closed bars only) into an intent.
+
+        Feature-based strategies build indicators from candles; market-based
+        strategies (e.g. cross-sectional momentum) consume the snapshot
+        directly.  Strategies that need ``FeatureSet`` input must not be fed
+        a market snapshot, and vice versa.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} evaluates features, not a market snapshot; "
+            "it does not implement evaluate_market()"
+        )
+
+    def build_intent(
+        self,
+        features: CrossSectionalFeatureSnapshot,
+        state: PortfolioState,
+    ) -> PortfolioIntent:
+        """Portfolio-oriented alias for :meth:`evaluate`."""
+        return self.evaluate(features, state)
+
+
+class Strategy(CandidateStrategy):
+    """Backward-compatible name for :class:`CandidateStrategy`.
+
+    Existing signal engines continue to inherit this class unchanged, and are
+    consequently registered as ``candidate`` strategies.
+    """

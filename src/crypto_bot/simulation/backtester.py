@@ -7,6 +7,13 @@ Supports multi-symbol multi-timeframe backtesting with a unified clock that
 ticks on *every* bar close across *all* configured timeframes — the same
 shared-capital regime as the live SignalExecutor.
 
+Two decision layers run through the SAME replay loop, selected with the
+``strategy_mode`` argument::
+
+    Backtester
+        ├── candidate  (default) — DecisionPipeline + SignalExecutor
+        └── portfolio  — PortfolioDecisionPipeline + risk engine + PortfolioExecutor
+
 Usage (from CLI)::
 
     crypto-bot backtest BTC/USDT 1h --start 2025-01-01 --end 2025-02-01
@@ -18,21 +25,39 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 
 from ..config.env import Config
-from ..core.enums import Mode
+from ..config.schemas import RegimeConfig
+from ..core.enums import Mode, Side, Signal, StrategyType
 from ..core.logging_setup import get_logger
 from ..core.policy import timeframe_to_seconds
-from ..core.types import FeatureSet
+from ..core.types import Candle, DecisionRecord, FeatureSet
+from ..data.funding import FundingRepository, HistoricalFundingSource
+from ..data.instruments import InstrumentCache, build_instrument_cache
 from ..features.batch import aligned_correlation, closes_by_timestamp
 from ..features.builder import FeatureBuilder, builder_from_settings
 from ..features.context import SymbolMarketContext
 from ..pipeline.factory import (
     build_decision_pipeline,
+    build_portfolio_decision_pipeline,
+    build_portfolio_risk_engine,
+    build_portfolio_strategy,
     build_strategy_manager,
     get_active_strategy,
 )
+from ..portfolio import (
+    CrossSectionalFeatureSnapshot,
+    MarketSnapshot,
+    PortfolioRiskEngine,
+    PortfolioRiskLimits,
+    PortfolioRiskReport,
+    PortfolioState,
+    UniverseSnapshot,
+    VolatilitySizingParams,
+)
 from ..simulation.executor import SignalExecutor
 from ..simulation.pnl import PnLSummary, PnLTracker
+from ..simulation.portfolio_executor import PortfolioExecutor
 from ..storage.db import Database, Repositories
+from ..strategy.base import PortfolioStrategy
 from .historical_source import HistoricalCandleSource
 
 logger = get_logger(__name__)
@@ -47,6 +72,7 @@ class BacktestManifest:
     start_ms: int
     end_ms: int
     conflict_resolution: str
+    strategy_mode: str = StrategyType.CANDIDATE.value
     intrabar_note: str = "Intrabar SL/TP resolution: pessimistic (default: SL wins on conflict)"
 
 
@@ -56,9 +82,11 @@ class Backtester:
     Supports multiple symbols and timeframes simultaneously, with real
     cross-asset correlation features for BTC and ETH.
 
-    Design principle: every component (``FeatureBuilder``, ``DecisionPipeline``,
-    ``SignalExecutor``) is the *exact same instance* used in the live loop.
-    The only difference is the data source and the clock.
+    Design principle: every component (``FeatureBuilder``, decision pipeline,
+    executor) is the *exact same instance* used in the live loop.  The only
+    difference is the data source and the clock.  ``strategy_mode`` selects
+    which decision layer is replayed; the loop, clock, SL/TP resolution and
+    equity recording are shared between both modes.
     """
 
     def __init__(
@@ -74,6 +102,9 @@ class Backtester:
         source: HistoricalCandleSource | None = None,
         last_trade_time: dict[str, datetime] | None = None,
         market_map: dict[str, SymbolMarketContext] | None = None,
+        strategy_mode: StrategyType | str = StrategyType.CANDIDATE,
+        portfolio_limits: PortfolioRiskLimits | None = None,
+        regime_config: RegimeConfig | None = None,
     ) -> None:
         self._config = config
         self._symbols = [symbols] if isinstance(symbols, str) else symbols
@@ -82,12 +113,20 @@ class Backtester:
         self._end_ms = end_ms
         self._conflict = conflict_resolution
         self._market_map = market_map or {}
+        try:
+            self._mode = StrategyType(strategy_mode)
+        except ValueError as exc:
+            raise ValueError(
+                f"strategy_mode must be {StrategyType.CANDIDATE.value!r} or "
+                f"{StrategyType.PORTFOLIO.value!r}, got {strategy_mode!r}"
+            ) from exc
         self._manifest = BacktestManifest(
             symbols=self._symbols,
             timeframes=self._timeframes,
             start_ms=start_ms,
             end_ms=end_ms,
             conflict_resolution=conflict_resolution,
+            strategy_mode=self._mode.value,
             intrabar_note=(
                 "Intrabar SL/TP resolution: pessimistic"
                 if conflict_resolution == "pessimistic"
@@ -122,13 +161,62 @@ class Backtester:
         self._db = db
         self._repos = Repositories(self._db)
         self._builder: FeatureBuilder = builder_from_settings(settings)
-        self._pipeline = build_decision_pipeline(settings, last_trade_time=last_trade_time)
-        self._strategy_mgr = build_strategy_manager(settings, strategy_name="per_timeframe")
-        self._strategy = get_active_strategy(self._strategy_mgr)
-        self._executor = SignalExecutor(
-            config, self._repos, PnLTracker(),
-        )
         self._source = source or HistoricalCandleSource(self._repos.candles)
+        # Funding source for accruing funding payments on positions
+        self._funding_source = HistoricalFundingSource(FundingRepository(self._db))
+        # R0.4: Instrument cache for qty rounding and minNotional checks (built lazily)
+        self._instrument_cache: InstrumentCache | None = None
+        # R4: Regime config for portfolio fusion
+        self._regime_config = regime_config
+
+        if self._mode == StrategyType.CANDIDATE:
+            self._pipeline = build_decision_pipeline(settings, last_trade_time=last_trade_time)
+            self._strategy_mgr = build_strategy_manager(settings, strategy_name="per_timeframe")
+            self._strategy = get_active_strategy(self._strategy_mgr)
+            self._executor = SignalExecutor(
+                config, self._repos, PnLTracker(),
+            )
+        else:
+            self._portfolio_pipeline = build_portfolio_decision_pipeline(settings, regime_config=regime_config)
+            self._portfolio_strategy = build_portfolio_strategy(settings)
+            self._risk_engine: PortfolioRiskEngine = (
+                build_portfolio_risk_engine(settings)
+                if portfolio_limits is None
+                else PortfolioRiskEngine(portfolio_limits)
+            )
+            self._volatility_sizing = (
+                VolatilitySizingParams() if settings.portfolio.volatility_sizing else None
+            )
+            # Instrument cache will be set in run_async before use
+            self._executor = PortfolioExecutor(
+                config, self._repos, PnLTracker(), instrument_cache=None
+            )
+            # Market-snapshot strategies (e.g. cross_sectional_momentum_v0)
+            # evaluate closed bars via ``evaluate_market`` and rebalance on a
+            # cadence; feature strategies keep the tick-by-tick evaluation.
+            self._market_strategy = (
+                type(self._portfolio_strategy).evaluate_market
+                is not PortfolioStrategy.evaluate_market
+            )
+            csm = getattr(settings.portfolio, "csm", None)
+            self._rebalance_ms = (
+                (csm.rebalance_hours if csm is not None else 24) * 3_600_000
+                if self._market_strategy
+                else 0
+            )
+            self._last_rebalance_ms: int | None = None
+
+            # Validate timeframe consistency for market-snapshot strategies
+            if self._market_strategy and csm is not None and csm.timeframe not in self._timeframes:
+                raise ValueError(
+                    f"csm.timeframe ({csm.timeframe!r}) must be one of the "
+                    f"backtest timeframes {self._timeframes!r}"
+                )
+
+    @property
+    def strategy_mode(self) -> StrategyType:
+        """The decision layer this backtest replays."""
+        return self._mode
 
     def _build_unified_clock(
         self,
@@ -193,6 +281,12 @@ class Backtester:
             for sym in self._symbols:
                 self._repos.positions.delete_for_symbol(sym)
 
+            # R0.4: Build instrument cache for portfolio mode
+            if self._mode == StrategyType.PORTFOLIO:
+                self._instrument_cache = await build_instrument_cache(self._config)
+                # Set it on the executor
+                self._executor._instrument_cache = self._instrument_cache
+
             # Load all required candle data. Reference symbols (BTC/ETH) may
             # not be available — that's fine, correlations default to 0.
             for sym in self._all_symbols:
@@ -202,6 +296,13 @@ class Backtester:
                             await self._source.load_all_async(sym, tf)
                         except (AssertionError, Exception) as exc:
                             logger.info("bt: cannot load %s %s — %s", sym, tf, exc)
+
+            # Load funding data for all test symbols
+            for sym in self._symbols:
+                try:
+                    self._funding_source.load_from_repo(sym, self._start_ms, self._end_ms)
+                except Exception as exc:
+                    logger.info("bt: cannot load funding for %s — %s", sym, exc)
 
             # Unified clock: ticks on every bar close across ALL timeframes
             unified_clock = self._build_unified_clock(
@@ -260,9 +361,12 @@ class Backtester:
                             logger.info("bt: skip sym=%s ts=%d — %s", sym, as_of, exc)
 
                     if not features_map:
-                        self._record_equity(as_of)
-                        bar_count += 1
-                        continue
+                        if self._mode == StrategyType.PORTFOLIO and self._market_strategy:
+                            pass  # market strategies rebalance without features
+                        else:
+                            self._record_equity(as_of)
+                            bar_count += 1
+                            continue
                 except Exception as exc:
                     logger.info("bt: skip ts=%d — %s", as_of, exc)
                     bar_count += 1
@@ -301,40 +405,10 @@ class Backtester:
                 # Pipeline — skip entirely if halted (flag already set)
                 if not self._emergency_halt_triggered:
                     try:
-                        result = self._pipeline.process(
-                            features_map,
-                            self._strategy,
-                            per_timeframe=True,
-                            as_of_ms=as_of,
-                        )
-
-                        selected = result.get("selected", [])
-                        rejected = result.get("rejected", [])
-                        processed = result.get("total_processed", 0)
-                        reject_reasons = [
-                            (r.reject_reason.value if r.reject_reason else "none",
-                             r.rejected_by or "?",
-                             r.explanation[:80] if r.explanation else "")
-                            for r in rejected[:3]
-                        ]
-                        logger.info(
-                            "bt: pipeline ts=%d processed=%d selected=%d rejected=%d reasons=%s",
-                            as_of, processed, len(selected), len(rejected),
-                            reject_reasons,
-                        )
-
-                        # current prices for unrealized P&L gate in executor
-                        current_prices: dict[tuple[str, str], float] = {}
-                        for pos in self._executor.tracker.positions:
-                            if not pos.is_open:
-                                continue
-                            chk = self._source.slice(as_of, pos.symbol, pos.timeframe)
-                            if chk:
-                                current_prices[(pos.symbol, pos.timeframe)] = chk[-1].close
-
-                        for report in selected:
-                            self._executor.handle_selected(report, current_prices=current_prices)
-                        self._executor.handle_rejected_many(rejected)
+                        if self._mode == StrategyType.CANDIDATE:
+                            self._run_candidate_tick(features_map, as_of)
+                        else:
+                            self._run_portfolio_tick(features_map, symbol_candles, as_of)
                     except Exception as exc:
                         logger.exception("bt: pipeline failed at ts=%d: %s", as_of, exc)
 
@@ -354,6 +428,9 @@ class Backtester:
                             conflict_resolution=self._conflict,
                             bar_timestamp_ms=as_of,
                         )
+
+                # Accrue funding for all open positions
+                self._executor.accrue_funding(self._funding_source, as_of)
 
                 # Record equity on every tick
                 self._record_equity(as_of)
@@ -383,6 +460,255 @@ class Backtester:
     def run(self) -> PnLSummary:
         """Synchronous convenience wrapper."""
         return asyncio.run(self.run_async())
+
+    def _run_candidate_tick(self, features_map: dict[str, dict[str, FeatureSet]], as_of: int) -> None:
+        """Replay one tick through the candidate decision pipeline (unchanged)."""
+        result = self._pipeline.process(
+            features_map,
+            self._strategy,
+            per_timeframe=True,
+            as_of_ms=as_of,
+        )
+
+        selected = result.get("selected", [])
+        rejected = result.get("rejected", [])
+        processed = result.get("total_processed", 0)
+        reject_reasons = [
+            (r.reject_reason.value if r.reject_reason else "none",
+             r.rejected_by or "?",
+             r.explanation[:80] if r.explanation else "")
+            for r in rejected[:3]
+        ]
+        logger.info(
+            "bt: pipeline ts=%d processed=%d selected=%d rejected=%d reasons=%s",
+            as_of, processed, len(selected), len(rejected),
+            reject_reasons,
+        )
+
+        # current prices for unrealized P&L gate in executor
+        current_prices: dict[tuple[str, str], float] = {}
+        for pos in self._executor.tracker.positions:
+            if not pos.is_open:
+                continue
+            chk = self._source.slice(as_of, pos.symbol, pos.timeframe)
+            if chk:
+                current_prices[(pos.symbol, pos.timeframe)] = chk[-1].close
+
+        for report in selected:
+            self._executor.handle_selected(report, current_prices=current_prices)
+        self._executor.handle_rejected_many(rejected)
+
+    def _run_portfolio_tick(
+        self,
+        features_map: dict[str, dict[str, FeatureSet]],
+        symbol_candles: dict[str, dict[str, list]],
+        as_of: int,
+    ) -> None:
+        """Replay one tick through the portfolio decision layer.
+
+        Flow per tick: UniverseSnapshot -> PortfolioDecisionPipeline (features
+        + strategy intent) -> PortfolioRiskEngine (limits + optional volatility
+        sizing) -> PortfolioExecutor (weight-sized positions, DB first).
+
+        Market-snapshot strategies (``evaluate_market``) run on a rebalance
+        cadence over a closed-bar MarketSnapshot instead of features; on
+        non-rebalance ticks their pipeline is skipped entirely and positions
+        are only held, SL/TP-checked and marked to market.  On rebalance
+        ticks positions that left the target book (or flipped side) are
+        closed before the new intents are opened.
+        """
+        fastest_tf = min(self._timeframes, key=lambda tf: timeframe_to_seconds(tf))
+        tracker = self._executor.tracker
+        equity = tracker.current_equity
+        universe = UniverseSnapshot(
+            as_of_ms=as_of,
+            symbols=tuple(self._symbols),
+            quote_currency=self._quote,
+        )
+        state = PortfolioState(
+            as_of_ms=as_of,
+            mode=Mode.PAPER,
+            equity=equity,
+            cash=equity,
+        )
+
+        if self._market_strategy:
+            if not self._rebalance_due(as_of):
+                return
+            snapshot = self._market_snapshot(symbol_candles, fastest_tf, as_of)
+            if snapshot is None:
+                return
+            intent = self._portfolio_pipeline.process_market(
+                snapshot, state, self._portfolio_strategy,
+                historical_candles=symbol_candles,
+            )
+            cross_section = None
+        else:
+            intent = self._portfolio_pipeline.process(
+                universe,
+                symbol_candles,
+                self._market_map,
+                state,
+                self._portfolio_strategy,
+                trigger_tf=fastest_tf,
+            )
+            cross_section = None
+            primary_tf = fastest_tf if fastest_tf in self._timeframes else self._timeframes[0]
+            if features_map:
+                snapshot_features = {
+                    sym: by_tf[primary_tf]
+                    for sym, by_tf in features_map.items()
+                    if primary_tf in by_tf
+                }
+                if snapshot_features:
+                    cross_section = CrossSectionalFeatureSnapshot(
+                        as_of_ms=as_of,
+                        universe=universe,
+                        features_by_symbol=snapshot_features,
+                    )
+
+        report = self._risk_engine.evaluate(
+            intent, state, cross_section, sizing=self._volatility_sizing
+        )
+
+        self._journal_portfolio_report(report, as_of, fastest_tf)
+
+        if self._market_strategy:
+            self._rebalance_positions(report, as_of)
+
+        for position_intent in report.adjusted_intent.intents:
+            tf = position_intent.timeframe or fastest_tf
+            feature = features_map.get(position_intent.symbol, {}).get(tf)
+            if self._market_strategy:
+                bars = symbol_candles.get(position_intent.symbol, {}).get(tf)
+                if not bars:
+                    logger.info(
+                        "bt: portfolio skip %s ts=%d — no bars on %s",
+                        position_intent.symbol, as_of, tf,
+                    )
+                    continue
+                bar = bars[-1]
+                entry = bar.close
+                if entry <= 0:
+                    continue
+                atr_pct = (bar.high - bar.low) / bar.low * 100.0 if bar.low > 0 else 1.0
+                spread_pct = 0.0
+            elif feature is not None:
+                entry = feature.close if feature.close > 0 else feature.ema_fast
+                atr_pct = feature.atr_pct
+                spread_pct = feature.spread_pct
+            else:
+                logger.info(
+                    "bt: portfolio skip %s ts=%d — no features on %s",
+                    position_intent.symbol, as_of, tf,
+                )
+                continue
+            self._executor.open_position(
+                position_intent,
+                entry_price=entry,
+                atr_pct=atr_pct,
+                spread_pct=spread_pct,
+                timestamp_ms=as_of,
+            )
+
+        logger.info(
+            "bt: portfolio ts=%d intents=%d accepted=%d rejected=%d gross=%.4f net=%.4f",
+            as_of,
+            len(intent.intents),
+            sum(1 for r in report.position_results if r.accepted),
+            sum(1 for r in report.position_results if not r.accepted),
+            report.gross_exposure,
+            report.net_exposure,
+        )
+
+    def _rebalance_due(self, as_of: int) -> bool:
+        """True when the market strategy must re-evaluate at ``as_of``."""
+        if self._last_rebalance_ms is None or as_of - self._last_rebalance_ms >= self._rebalance_ms:
+            self._last_rebalance_ms = as_of
+            return True
+        return False
+
+    def _market_snapshot(
+        self,
+        symbol_candles: dict[str, dict[str, list]],
+        fastest_tf: str,
+        as_of: int,
+    ) -> MarketSnapshot | None:
+        """Closed-bar cross-sectional snapshot for symbols with bars at ``as_of``."""
+        candles_by_symbol: dict[str, tuple[Candle, ...]] = {}
+        for sym in self._symbols:
+            bars = symbol_candles.get(sym, {}).get(fastest_tf)
+            if bars:
+                candles_by_symbol[sym] = tuple(bars)
+        if not candles_by_symbol:
+            return None
+        return MarketSnapshot(
+            as_of_ms=as_of,
+            timeframe=fastest_tf,
+            candles_by_symbol=candles_by_symbol,
+        )
+
+    def _rebalance_positions(self, report: PortfolioRiskReport, as_of: int) -> None:
+        """Close open positions that left the target book (dropped or flipped).
+
+        Positions whose (symbol, side) is still in the risk-adjusted intent
+        are held untouched; everything else is closed at the latest close
+        with fees, and the new intents are opened right after.
+        """
+        desired = {
+            (pi.symbol, pi.side) for pi in report.adjusted_intent.intents
+        }
+        for paper_pos in list(self._executor.tracker.positions):
+            if not paper_pos.is_open:
+                continue
+            if (paper_pos.symbol, paper_pos.side) in desired:
+                continue
+            bar = self._source.slice(as_of, paper_pos.symbol, paper_pos.timeframe)
+            exit_price = bar[-1].close if bar else paper_pos.entry_price
+            stats = self._executor.close_position_for_symbol(
+                paper_pos.symbol,
+                paper_pos.timeframe,
+                reason="rebalance",
+                exit_price=exit_price,
+                closed_at_ms=as_of,
+            )
+            if stats["closed"]:
+                logger.info(
+                    "bt: rebalance close %s %s @ %.4f pnl=%.4f",
+                    paper_pos.symbol, paper_pos.timeframe, exit_price, stats["closed_pnl"],
+                )
+
+    def _journal_portfolio_report(
+        self,
+        report: PortfolioRiskReport,
+        as_of: int,
+        fallback_tf: str,
+    ) -> None:
+        """Journal accepted/rejected portfolio positions with their reasons."""
+        records: list[DecisionRecord] = []
+        for result in report.position_results:
+            signal = (
+                Signal.BUY if result.side == Side.LONG else Signal.SELL
+            ) if result.accepted else None
+            detail = (
+                "portfolio position accepted"
+                if result.accepted
+                else f"portfolio:{result.reason.value if result.reason else 'rejected'}"
+            )
+            records.append(
+                DecisionRecord(
+                    timestamp=datetime.fromtimestamp(as_of / 1000, tz=UTC),
+                    symbol=result.symbol,
+                    timeframe=result.timeframe or fallback_tf,
+                    accepted=result.accepted,
+                    reason=None,
+                    detail=detail,
+                    signal=signal,
+                    outcome="position_opened" if result.accepted else "no_position",
+                )
+            )
+        if records:
+            self._repos.decisions.insert_many(records)
 
     @property
     def manifest(self) -> BacktestManifest:

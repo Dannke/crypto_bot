@@ -117,7 +117,8 @@ def test_builder_populates_microstructure_fields():
     assert fs.volume == candles[-1].volume
     assert fs.liquidity_score > 0
     assert fs.spread_pct == 0.08
-    assert fs.market_regime in ("bull", "bear", "neutral", "choppy")
+    # R1: New 4-regime taxonomy
+    assert fs.market_regime in ("trend_low_vol", "trend_high_vol", "range_low_vol", "range_high_vol")
     assert fs.bb_upper >= fs.bb_lower
 
 

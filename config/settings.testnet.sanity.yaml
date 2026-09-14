@@ -22,6 +22,7 @@ runtime:
   loop_interval_seconds: 60
   timezone: UTC
   strategy: per_timeframe
+  strategy_type: candidate # candidate | portfolio
 
 exchange:
   name: bybit
@@ -86,6 +87,22 @@ risk:
   max_open_positions: 5
   max_daily_drawdown_pct: 3.0
   emergency_drawdown_pct: 6.0
+
+portfolio:
+  strategy_name: long_only_trend   # long_only_trend | cross_sectional_momentum_v0
+  volatility_sizing: false
+  risk:
+    max_positions: 5
+    max_position_weight: 0.5
+    max_gross_exposure: 1.0
+    max_net_exposure: 1.0
+  csm:                             # used only when strategy_name = cross_sectional_momentum_v0
+    timeframe: 1h
+    lookbacks: ["24h", "72h", "168h"]
+    long_percentile: 0.90
+    short_percentile: 0.10
+    weighting: equal
+    rebalance_hours: 24
 
 storage:
   db_path: data/crypto_bot_testnet.db

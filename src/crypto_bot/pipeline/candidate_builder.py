@@ -12,7 +12,7 @@ from ..core.types import FeatureSet
 from ..decision.decision_report import DecisionReport
 from ..filters.base import Filter, FilterResult
 from ..scoring.score_engine import ScoreEngine
-from ..strategy.base import Strategy
+from ..strategy.base import CandidateStrategy
 
 _FILTER_REJECT: dict[str, RejectReason] = {
     "insufficient_liquidity": RejectReason.INSUFFICIENT_LIQUIDITY,
@@ -81,7 +81,7 @@ class CandidateBuilder:
         self,
         symbol: str,
         features_by_tf: dict[str, FeatureSet],
-        strategy: Strategy,
+        strategy: CandidateStrategy,
         *,
         as_of_ms: int | None = None,
     ) -> tuple[DecisionReport | None, list[DecisionReport]]:
@@ -161,7 +161,7 @@ class CandidateBuilder:
     def build_batch(
         self,
         features_by_symbol: dict[str, dict[str, FeatureSet]],
-        strategy: Strategy,
+        strategy: CandidateStrategy,
         *,
         as_of_ms: int | None = None,
     ) -> tuple[list[DecisionReport], list[DecisionReport]]:
@@ -191,7 +191,7 @@ class CandidateBuilder:
     def build_batch_per_tf(
         self,
         features_by_symbol: dict[str, dict[str, FeatureSet]],
-        strategy: Strategy,
+        strategy: CandidateStrategy,
         *,
         as_of_ms: int | None = None,
     ) -> tuple[list[DecisionReport], list[DecisionReport]]:

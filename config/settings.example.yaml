@@ -9,6 +9,7 @@ runtime:
   mode: signal_only        # signal_only | paper | live
   loop_interval_seconds: 60
   timezone: UTC
+  strategy_type: candidate # candidate | portfolio
 
 exchange:
   name: binance
@@ -68,6 +69,22 @@ risk:
   max_open_positions: 5
   max_daily_drawdown_pct: 3.0        # stop opening new positions at this loss
   emergency_drawdown_pct: 6.0        # hard halt: flatten & exit loop
+
+portfolio:
+  strategy_name: long_only_trend     # long_only_trend | cross_sectional_momentum_v0
+  volatility_sizing: false           # inverse-vol weight scaling in the risk engine
+  risk:
+    max_positions: 5
+    max_position_weight: 0.5
+    max_gross_exposure: 1.0
+    max_net_exposure: 1.0
+  csm:                               # used only when strategy_name = cross_sectional_momentum_v0
+    timeframe: 1h                    # momentum computed on this timeframe
+    lookbacks: ["24h", "72h", "168h"]  # durations; each must be a multiple of the timeframe
+    long_percentile: 0.90            # hold symbols ranked in the top 10%
+    short_percentile: 0.10           # omit/null for long-only; else short the bottom 10%
+    weighting: equal                 # v0 supports only 'equal'
+    rebalance_hours: 24              # portfolio rebalance cadence (orchestration)
 
 storage:
   db_path: data/crypto_bot.db

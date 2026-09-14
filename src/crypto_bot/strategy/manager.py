@@ -1,51 +1,36 @@
-"""Strategy manager: manages active strategies and execution.
-
-Provides a high-level interface for managing multiple strategies,
-switching between them, and executing strategy logic.
-"""
+"""Lifecycle management for registered candidate and portfolio strategies."""
 from __future__ import annotations
 
 from typing import Any
 
-from .base import Strategy, StrategyContext
+from ..core.enums import StrategyType
+from .base import CandidateStrategy, PortfolioStrategy, StrategyContext
 from .registry import StrategyRegistry
+
+StrategyInstance = CandidateStrategy | PortfolioStrategy
 
 
 class StrategyManager:
-    """Manager for trading strategies.
+    """Activate named strategy instances without conflating their interfaces."""
 
-    Handles strategy selection, initialization, and execution.
-    Supports running multiple strategies simultaneously and switching
-    between them based on configuration.
-    """
-
-    def __init__(
-        self,
-        registry: StrategyRegistry | None = None,
-    ) -> None:
+    def __init__(self, registry: StrategyRegistry | None = None) -> None:
         self._registry = registry or StrategyRegistry()
-        self._active_strategies: dict[str, Strategy] = {}
+        self._active_strategies: dict[str, StrategyInstance] = {}
         self._default_strategy: str | None = None
 
-    def set_default_strategy(self, name: str) -> None:
-        """Set the default strategy name.
-
-        Args:
-            name: Name of the strategy to use as default.
-
-        Raises:
-            ValueError: If the strategy is not registered.
-        """
-        if not self._registry.is_registered(name):
+    def set_default_strategy(
+        self,
+        name: str,
+        *,
+        strategy_type: StrategyType | None = None,
+    ) -> None:
+        """Set the default strategy, optionally asserting its registered type."""
+        if not self._registry.is_registered(name, strategy_type=strategy_type):
             raise ValueError(f"Strategy '{name}' is not registered")
         self._default_strategy = name
 
-    def get_default_strategy(self) -> Strategy | None:
-        """Get the default strategy instance.
-
-        Returns:
-            The default strategy instance, or None if not set.
-        """
+    def get_default_strategy(self) -> StrategyInstance | None:
+        """Return the activated default strategy, if any."""
         if self._default_strategy is None:
             return None
         return self._active_strategies.get(self._default_strategy)
@@ -55,84 +40,42 @@ class StrategyManager:
         name: str,
         context: StrategyContext,
         *args: Any,
+        strategy_type: StrategyType | None = None,
         **kwargs: Any,
-    ) -> Strategy:
-        """Activate a strategy with the given context.
-
-        Args:
-            name: Name of the strategy to activate.
-            context: Strategy context with parameters.
-            *args: Additional arguments for strategy constructor.
-            **kwargs: Additional keyword arguments for strategy constructor.
-
-        Returns:
-            The activated strategy instance.
-
-        Raises:
-            ValueError: If the strategy is not registered.
-        """
-        strategy = self._registry.create(name, context, *args, **kwargs)
+    ) -> StrategyInstance:
+        """Instantiate and activate a registered strategy."""
+        strategy = self._registry.create(
+            name, context, *args, strategy_type=strategy_type, **kwargs
+        )
         if strategy is None:
             raise ValueError(f"Strategy '{name}' is not registered")
-
         self._active_strategies[name] = strategy
         return strategy
 
     def deactivate_strategy(self, name: str) -> None:
-        """Deactivate a strategy.
-
-        Args:
-            name: Name of the strategy to deactivate.
-
-        Raises:
-            KeyError: If the strategy is not active.
-        """
+        """Deactivate an existing named strategy."""
         if name not in self._active_strategies:
             raise KeyError(f"Strategy '{name}' is not active")
         del self._active_strategies[name]
 
-    def get_strategy(self, name: str) -> Strategy | None:
-        """Get an active strategy by name.
-
-        Args:
-            name: Name of the strategy to retrieve.
-
-        Returns:
-            The strategy instance, or None if not active.
-        """
+    def get_strategy(self, name: str) -> StrategyInstance | None:
+        """Return an activated strategy by name, if any."""
         return self._active_strategies.get(name)
 
     def list_active_strategies(self) -> list[str]:
-        """List names of all active strategies.
-
-        Returns:
-            List of active strategy names.
-        """
+        """List activated strategy names."""
         return list(self._active_strategies.keys())
 
-    def evaluate_with_default(
-        self,
-        symbol: str,
-        features_by_tf: dict[str, Any],
-    ) -> Any:
-        """Evaluate using the default strategy.
-
-        Args:
-            symbol: Symbol to evaluate.
-            features_by_tf: Features by timeframe.
-
-        Returns:
-            Signal result from the strategy.
-
-        Raises:
-            RuntimeError: If no default strategy is set.
-        """
+    def evaluate_with_default(self, symbol: str, features_by_tf: dict[str, Any]) -> Any:
+        """Evaluate the default candidate strategy using the legacy helper API."""
         strategy = self.get_default_strategy()
         if strategy is None:
             raise RuntimeError("No default strategy set")
+        if not isinstance(strategy, CandidateStrategy):
+            raise RuntimeError("Default strategy is a portfolio strategy, not a candidate strategy")
         return strategy.evaluate(symbol, features_by_tf)
 
     @property
     def registry(self) -> StrategyRegistry:
-        """Get the strategy registry."""
+        """Expose the registry for inspection and extension."""
         return self._registry
