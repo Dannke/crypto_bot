@@ -275,6 +275,51 @@ class TestPostOnlyExecution:
         # Position should now be open
         assert len([p for p in ex.tracker.positions if p.is_open]) == 1
 
+    def test_halt_cancels_pending_post_only_entry(self, executor_post_only) -> None:
+        """Halt обязан блокировать исполнение УЖЕ размещённых заявок.
+
+        В цикле бэктестера _process_post_only стоит до гейта
+        `if not self._emergency_halt_triggered`, поэтому заявка с прошлого бара
+        иначе откроет позицию после объявления аварийной остановки.
+        """
+        ex, _db = executor_post_only
+        result = ex.open_position(
+            _intent("BTC/USDT", weight=0.5, side=Side.LONG),
+            entry_price=100.0,
+            atr_pct=1.0,
+            timestamp_ms=1_700_000_000_000,
+        )
+        assert result.handled
+
+        ex.emergency_halt = True
+
+        # Бар касается лимита — без гейта заявка исполнилась бы.
+        results = ex.process_post_only_entries(
+            "BTC/USDT", "1h", low=99.9, high=101.0, timestamp_ms=1_700_003_600_000
+        )
+        assert results == []
+        assert [p for p in ex.tracker.positions if p.is_open] == []
+        assert ex.pending_post_only == (), "заявка должна быть снята, а не висеть"
+
+    def test_close_all_positions_clears_pending_post_only(self, executor_post_only) -> None:
+        """Аварийное закрытие снимает висящие заявки.
+
+        Иначе post-only выход на следующем баре возьмёт из pending уже закрытую
+        позицию и упадёт с "Position is already closed".
+        """
+        ex, _db = executor_post_only
+        ex.open_position(
+            _intent("BTC/USDT", weight=0.5, side=Side.LONG),
+            entry_price=100.0,
+            atr_pct=1.0,
+            timestamp_ms=1_700_000_000_000,
+        )
+        assert ex.pending_post_only != ()
+
+        ex.close_all_positions("emergency_drawdown", closed_at_ms=1_700_003_600_000)
+
+        assert ex.pending_post_only == ()
+
     def test_post_only_entry_timeout_cancels_order(self, executor_post_only) -> None:
         """Post-only entry cancels after timeout (1h) if not filled."""
         ex, db = executor_post_only
