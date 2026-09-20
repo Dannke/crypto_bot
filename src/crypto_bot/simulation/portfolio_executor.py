@@ -81,6 +81,14 @@ class PortfolioExecutor:
         )
         self._post_only_entry = mr_is_active and getattr(mr, 'entry_execution', None) == 'post_only'
         self._post_only_exit = mr_is_active and getattr(mr, 'exit_execution', None) == 'post_only'
+        # Зарегистрированная модель исполнения mean_reversion_v0 знает только три
+        # выхода: реверсия (|z| <= exit_threshold), time-stop (max_holding_bars) и
+        # рыночный fallback по таймауту. ATR-стопы навешивались общим портфельным
+        # слоем и перехватывали 97% выходов (47 stop_loss + 21 take_profit из 70
+        # сделок на реальных данных), подменяя maker-экономику на taker: 43.8%/год
+        # против 131.4%/год. Уровни продолжают храниться — колонки positions.stop
+        # и positions.take объявлены NOT NULL, — но для MR не проверяются.
+        self._sltp_exits_enabled = not mr_is_active
         self._post_only_entry_timeout_hours = 1
         self._post_only_exit_timeout_hours = 4
         self._pending_post_only_entries: dict[str, dict] = {}  # symbol -> {limit_price, side, timestamp, intent}
@@ -438,13 +446,19 @@ class PortfolioExecutor:
         conflict_resolution: str = "pessimistic",
         bar_timestamp_ms: int | None = None,
     ) -> dict[str, Any]:
-        """Close open positions whose SL/TP lies inside an OHLC bar's range."""
+        """Close open positions whose SL/TP lies inside an OHLC bar's range.
+
+        Не применяется к стратегиям, которые не регистрируют SL/TP как способ
+        выхода (см. ``_sltp_exits_enabled``).
+        """
         stats: dict[str, Any] = {
             "closed_by_sl": 0,
             "closed_by_tp": 0,
             "closed_by_sl_pnl": 0.0,
             "closed_by_tp_pnl": 0.0,
         }
+        if not self._sltp_exits_enabled:
+            return stats
 
         for paper_pos in list(self._tracker.positions):
             if not paper_pos.is_open:
