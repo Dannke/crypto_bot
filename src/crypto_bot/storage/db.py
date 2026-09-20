@@ -1,9 +1,11 @@
 """Database layer: SQLite persistence for candles, signals, positions, and state."""
 from __future__ import annotations
 
+import asyncio
 import sqlite3
 from pathlib import Path
 
+from ..core import policy
 from ..core.enums import Mode, OrderStatus, OrderType, Side, TradeStatus
 from ..core.exceptions import StorageError
 from .migrations import _MIGRATIONS_FILE
@@ -540,6 +542,11 @@ class CandleRepository:
     def __init__(self, db: Database):
         self._db = db
 
+    _SELECT = (
+        "SELECT symbol, timeframe, ts_ms as timestamp, open, high, low, close, volume "
+        "FROM candles WHERE symbol=? AND timeframe=? AND ts_ms >= ? "
+    )
+
     def fetch(
         self,
         symbol: str,
@@ -547,19 +554,51 @@ class CandleRepository:
         since_ms: int = 0,
         limit: int = 400,
     ) -> list[Candle]:
-        sql = "SELECT symbol, timeframe, ts_ms as timestamp, open, high, low, close, volume FROM candles WHERE symbol=? AND timeframe=? AND ts_ms >= ? ORDER BY ts_ms ASC LIMIT ?"
-        rows = self._db._conn.execute(sql, (symbol, timeframe, 0, limit)).fetchall()
-        return [Candle(**row) for row in rows]
+        """Последние ``limit`` свечей начиная с ``since_ms``, в порядке возрастания.
+
+        Ограниченное чтение для живого фида: ``limit`` зажимается политикой
+        ``policy.MAX_CANDLES_LOOKBACK``. Бэктесту нужна вся история — он
+        обязан использовать :meth:`fetch_since`, а не увеличивать limit здесь.
+
+        Берутся именно ПОСЛЕДНИЕ свечи (ORDER BY DESC + разворот), а не первые:
+        фиду нужен свежий хвост истории, а не её начало.
+        """
+        limit_val = max(1, min(int(limit), policy.MAX_CANDLES_LOOKBACK))
+        rows = self._db._conn.execute(
+            self._SELECT + "ORDER BY ts_ms DESC LIMIT ?",
+            (symbol, timeframe, since_ms, limit_val),
+        ).fetchall()
+        return [Candle(**row) for row in reversed(rows)]
 
     def fetch_since(
         self,
         symbol: str,
         timeframe: str,
         since_ms: int,
-        limit: int = 400,
+        limit: int | None = None,
     ) -> list[Candle]:
-        sql = "SELECT symbol, timeframe, ts_ms as timestamp, open, high, low, close, volume FROM candles WHERE symbol=? AND timeframe=? AND ts_ms >= ? ORDER BY ts_ms ASC LIMIT ?"
-        rows = self._db._conn.execute(sql, (symbol, timeframe, since_ms, limit)).fetchall()
+        """ВСЕ свечи начиная с ``since_ms``, в порядке возрастания.
+
+        Путь воспроизведения истории для бэктеста, намеренно НЕ ограниченный
+        ``policy.MAX_CANDLES_LOOKBACK``: эта политика защищает частоту обращений
+        к бирже, а не чтение локальной БД.
+
+        Ранее здесь стоял дефолт ``limit=400``, из-за чего вызовы вида
+        ``fetch_since(sym, tf, since_ms=0)`` — а так его зовут и
+        HistoricalCandleSource.load_all_async, и walk_forward — молча получали
+        первые 400 баров вместо всей истории. Бэктест на реальных данных читал
+        ~1.7% запрошенного и почти всегда промахивался мимо нужного окна.
+        """
+        if limit is None:
+            rows = self._db._conn.execute(
+                self._SELECT + "ORDER BY ts_ms ASC",
+                (symbol, timeframe, since_ms),
+            ).fetchall()
+        else:
+            rows = self._db._conn.execute(
+                self._SELECT + "ORDER BY ts_ms ASC LIMIT ?",
+                (symbol, timeframe, since_ms, max(1, int(limit))),
+            ).fetchall()
         return [Candle(**row) for row in rows]
 
     def upsert_many(
@@ -610,11 +649,17 @@ class CandleRepository:
         symbol: str,
         timeframe: str,
         limit: int = 400,
+        since_ms: int = 0,
     ) -> list[Candle]:
-        """Fetch candles asynchronously."""
-        sql = "SELECT symbol, timeframe, ts_ms as timestamp, open, high, low, close, volume FROM candles WHERE symbol=? AND timeframe=? ORDER BY ts_ms ASC LIMIT ?"
-        rows = self._db._conn.execute(sql, (symbol, timeframe, limit)).fetchall()
-        return [Candle(**row) for row in rows]
+        """Async-обёртка над :meth:`fetch` через run_in_executor.
+
+        Делегирует, а не дублирует SQL: иначе политика ``MAX_CANDLES_LOOKBACK``
+        и порядок выборки расходятся между синхронным и асинхронным путём.
+        """
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(
+            None, lambda: self.fetch(symbol, timeframe, since_ms, limit)
+        )
 
     async def upsert_many_async(
         self,

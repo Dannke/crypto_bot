@@ -41,9 +41,10 @@ class HistoricalCandleSource:
     async def load_all_async(self, symbol: str, timeframe: str) -> None:
         """Load all available candles for *symbol* / *timeframe* into memory.
 
-        Uses ``CandleRepository.fetch_since`` with ``since_ms=0`` to bypass
-        the ``MAX_CANDLES_LOOKBACK`` cap — assumes the caller has already
-        populated the DB (e.g. via ``scripts/seed_history.py``).
+        Uses ``CandleRepository.fetch_since`` with ``since_ms=0`` and no row
+        limit: ``MAX_CANDLES_LOOKBACK`` guards live exchange fetches, not
+        replay of the local DB. Assumes the caller has already populated the
+        DB (e.g. via ``scripts/seed_history.py``).
         """
         assert self._repo is not None, "HistoricalCandleSource needs a repo to load from DB"
         candles = self._repo.fetch_since(symbol, timeframe, since_ms=0)
