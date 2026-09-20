@@ -219,6 +219,7 @@ class PortfolioIntent:
 
     as_of_ms: int
     intents: tuple[PositionIntent, ...]
+    closes: tuple[tuple[str, str, str], ...] = ()  # (symbol, timeframe, reason)
     universe: UniverseSnapshot | None = None
     strategy_name: str | None = None
 
@@ -247,6 +248,7 @@ class PortfolioIntent:
         return {
             "as_of_ms": self.as_of_ms,
             "intents": [intent.to_dict() for intent in self.intents],
+            "closes": [list(c) for c in self.closes],
             "universe": self.universe.to_dict() if self.universe else None,
             "strategy_name": self.strategy_name,
         }
@@ -264,9 +266,12 @@ class PortfolioIntent:
             if not isinstance(intent, Mapping):
                 raise ValueError("intents must contain mappings")
             intents.append(PositionIntent.from_dict(intent))
+        closes_raw = data.get("closes", [])
+        closes = tuple(tuple(c) for c in closes_raw) if closes_raw else ()
         return cls(
             as_of_ms=data["as_of_ms"],  # type: ignore[arg-type]
             intents=tuple(intents),
+            closes=closes,
             universe=UniverseSnapshot.from_dict(universe_raw) if universe_raw else None,
             strategy_name=data.get("strategy_name"),  # type: ignore[arg-type]
         )

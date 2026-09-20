@@ -220,6 +220,7 @@ class PortfolioRiskEngine:
             intents=tuple(candidates),
             universe=intent.universe,
             strategy_name=intent.strategy_name,
+            closes=intent.closes,
         )
 
         order = {

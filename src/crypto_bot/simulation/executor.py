@@ -14,8 +14,9 @@ from ..core.enums import ExecutorOutcome, Mode, OrderType, RejectReason, Side, S
 from ..core.logging_setup import get_logger
 from ..core.types import DecisionRecord
 from ..data.funding import HistoricalFundingSource
+from ..data.instruments import InstrumentCache
 from ..decision.decision_report import DecisionReport
-from ..execution.costs import ExecutionCostModel
+from ..execution.costs import CompositeCostModel, ExecutionCostModel
 from ..simulation.fees import FeeCalculator
 from ..simulation.paper_position import PaperPosition
 from ..simulation.pnl import PnLTracker
@@ -73,6 +74,8 @@ class SignalExecutor:
         self._fees = FeeCalculator()
         # Emergency drawdown halt flag (sticky - set by backtester when 6% DD hit)
         self._emergency_halt = False
+        # R0.4: Instrument cache for qty rounding and minNotional checks (set by backtester)
+        self._instrument_cache: InstrumentCache | None = None
 
     def _restore_tracker(self, symbol: str | None = None) -> PnLTracker:
         """Restore PnLTracker from DB on restart (open + closed positions).
@@ -307,16 +310,20 @@ class SignalExecutor:
             )
 
         # Apply slippage to entry price using spread_pct from feature context
-        raw_entry = report.features.get("last_close") or report.features.get("close", 0.0)
+        def _f(key: str, default: float = 0.0) -> float:
+            v = report.features.get(key, default)
+            return float(v) if v is not None else default
+
+        raw_entry = _f("last_close") or _f("close")
         if raw_entry <= 0:
-            raw_entry = report.features.get("ema_fast", 0.0)
+            raw_entry = _f("ema_fast")
         if raw_entry <= 0:
             return ExecutionResult(handled=False, message="invalid entry price")
 
-        spread_pct = report.features.get("spread_pct", 0.0)
+        spread_pct = _f("spread_pct")
         entry = self._apply_slippage(raw_entry, report.side, spread_pct, self._SLIPPAGE_FACTOR)
 
-        atr_pct = report.features.get("atr_pct", self._settings.risk.max_stop_distance_pct)
+        atr_pct = _f("atr_pct", self._settings.risk.max_stop_distance_pct)
         tp_multiple = _resolve_tf_tp(self._take_profit_risk_multiple, tf)
         levels = self._sltp.calculate(entry, report.side, atr_pct, reward_risk_ratio=tp_multiple)
 
@@ -637,11 +644,20 @@ class SignalExecutor:
 
         return stats
 
+    # Compatibility stubs for portfolio-mode interface (not used in candidate mode)
+    def open_position(self, *args, **kwargs):
+        """Compatibility stub for portfolio-mode interface (not used in candidate mode)."""
+        pass
+
+    def close_position_for_symbol(self, *args, **kwargs):
+        """Compatibility stub for portfolio-mode interface (not used in candidate mode)."""
+        return {"closed": 0, "closed_pnl": 0.0}
+
     def accrue_funding(
         self,
         funding_source: HistoricalFundingSource,
         bar_timestamp_ms: int,
-        cost_model: ExecutionCostModel | None = None,
+        cost_model: ExecutionCostModel | CompositeCostModel | None = None,
     ) -> dict[str, Any]:
         """Accrue funding for all open positions at a bar timestamp.
 
@@ -682,7 +698,7 @@ class SignalExecutor:
 
             # Use provided cost model or fall back to simple funding accrual
             if cost_model and hasattr(cost_model, 'accrue_funding'):
-                funding_result = cost_model.accrue_funding(
+                funding_result = cost_model.accrue_funding(  # type: ignore[attr-defined]
                     side=paper_pos.side,
                     weight=paper_pos.size / self._tracker.current_equity * paper_pos.entry_price,
                     entry_price=paper_pos.entry_price,

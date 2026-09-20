@@ -139,8 +139,7 @@ def main() -> None:
 
     # --- Fetch candles for all symbols ---
     print(f"Loading candles for {len(symbols)} symbols ({args.timeframe}) from {args.db} ...")
-    import asyncio
-    all_candles = asyncio.run(fetch_all_candles(args.db, symbols, args.timeframe))
+    all_candles = fetch_all_candles(args.db, symbols, args.timeframe)
     if not all_candles.get(symbols[0], []):
         print(f"FAIL: no candles found for {symbols[0]}")
         sys.exit(1)

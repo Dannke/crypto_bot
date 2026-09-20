@@ -211,6 +211,31 @@ python scripts/estimate_mr_turnover.py --max-positions 2 --holding-hours 8 --reb
 
 ---
 
+## Signal Frequency Analysis (Corrected)
+
+**Previous bug:** An earlier signal frequency check counted raw z-score threshold crossings per bar (hourly), ignoring the strategy's operational constraints:
+- `rebalance_hours=24` — entries only evaluated once per day
+- `max_positions=2` — only 2 concurrent positions allowed
+- Refractory period — existing positions block re-entry until exit
+
+**Corrected methodology** (`scripts/signal_frequency_check.py`):
+- Evaluates at rebalance cadence (every 24h), not every bar
+- Tracks concurrent positions and enforces `max_positions`
+- Tracks holding periods and enforces `max_holding_bars` time-stop
+- Respects exit threshold (reversion) exits
+
+**Theoretical upper bound:**
+- Max 2 entries/day (max_positions × 1 rebalance/day)
+- 366 days × 2 = 732 max entries total
+- 30% test split ≈ 220 trades (not ~2,800 as previously miscalculated)
+
+This is borderline for the `n_trades(test) ≥ 200` requirement. The actual number may be lower due to:
+- Not all rebalance slots filled (threshold not met)
+- Positions hitting time-stop before reversion exit
+- Symbols with insufficient data
+
+---
+
 ## ⚠️ Execution Model Status: FEE SCHEDULE ONLY
 
 **`bybit_perp_maker_only()` is currently ONLY a fee schedule change** (maker 2 bps + 1 bps slippage).
@@ -305,6 +330,66 @@ portfolio:
 
 ---
 
+## Test Count Clarification
+
+**Previous report claimed "125 MR-related tests pass"** — this was incorrect.
+
+**Actual test counts:**
+- `test_mean_reversion_config.py`: 14 tests (config schema validation, factory wiring)
+- `test_mean_reversion_v0.py`: 14 tests (z-score, ranking, thresholds, exit logic, weighting, contracts)
+- `test_portfolio_risk_engine.py`: 37 tests total (5 new for leg-aware correlation filter)
+- `test_regime_exposure_scaling.py`: 7 tests total (2 new for per-strategy regime overrides)
+
+**Total: 72 tests** (all passing, ruff clean)
+
+The 125 figure was a counting error in the prior report. The MR-specific new tests are 14 + 14 + 5 + 2 = 35. The other tests in those files are pre-existing portfolio/risk/regime tests that also pass.
+
+---
+
+## Pessimistic Bound (Taker/Taker Fees)
+
+**Command:**
+```bash
+python scripts/estimate_mr_turnover.py --max-positions 2 --holding-hours 8 --rebalance-hours 24 --fee-bps 10 --slippage-bps 5
+```
+
+**Output:**
+```
+======================================================================
+  MEAN REVERSION TURNOVER / COST ESTIMATE
+======================================================================
+  Max concurrent positions: 2
+  Timeframe: 1h
+  Rebalance: every 24h
+  Avg holding: 8.0 hours
+  Max round-trips/position/day: 1.0000
+
+  Cost assumptions:
+    Fee: 10.0 bps/side
+    Slippage: 5.0 bps/side
+    Funding: 0.0 bps/day
+
+  Turnover:
+    Round-trips/day: 2.00
+
+  Cost drag:
+    Daily: 60.0 bps
+    Annual: 219.00%
+
+  Break-even:
+    Required gross annual return: 219.00%
+
+  SANITY CHECK:
+  FAIL: Annual cost drag > 100% (219.0%)
+       Strategy CANNOT be profitable after costs with these parameters.
+       Fix: increase holding period, reduce max_positions, or reduce cadence.
+======================================================================
+```
+
+**Interpretation:** With realistic taker/taker fees (10 bps fee + 5 bps slippage per side), the annual cost drag is **219%** — the strategy **cannot** be profitable even with perfect fills. This is the **pessimistic bound** for decision-making.
+
+---
+
 ## Next Step
 
 **Complete maker-only execution model** (post-only exit logic in `PortfolioExecutor`, wire cost model into walk-forward), then run 3-way walk-forward:
@@ -321,6 +406,7 @@ python scripts/walk_forward.py \
   --db data/crypto_bot.db \
   --override portfolio__mean_reversion__max_holding_bars=48 \
   --override portfolio__mean_reversion__rebalance_hours=24 \
+  --override portfolio__mean_reversion__signal_lookback=8h \
   --override portfolio__mean_reversion__entry_threshold=3.0 \
   --override portfolio__mean_reversion__max_positions=2 \
   --override portfolio__mean_reversion__entry_execution=post_only \

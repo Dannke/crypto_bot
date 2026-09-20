@@ -235,7 +235,7 @@ async def run_orchestrator(config: Config) -> None:
                             executor.tracker.record_equity(datetime.now(tz=UTC), equity_now)
                             repos.equity.insert(
                                 currency=quote, equity=equity_now,
-                                drawdown_pct=None, mode=Mode.PAPER, ts_ms=int(time.time() * 1000),
+                                drawdown_pct=0.0, mode=Mode.PAPER, ts_ms=int(time.time() * 1000),
                             )
 
                     # ---- start background tick loop after first anchor ----

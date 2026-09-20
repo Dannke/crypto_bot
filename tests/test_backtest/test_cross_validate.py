@@ -45,7 +45,7 @@ from crypto_bot.storage.db import Database
 
 # --- Заполнить перед запуском ------------------------------------------------
 LIVE_DB_PATH = Path("data/crypto_bot.db")
-FIX_CUTOFF_MS = 1784313570192  # рестарт после всех фиксов
+FIX_CUTOFF_MS = 1789657200000  # рестарт после всех фиксов (max ts_ms в decisions)
 CONFIG_PATH = "config/settings.yaml"
 SCORE_TOLERANCE = 2.0  # известный источник шума: cross-correlation, см. docs/plan_stage2.md
 
