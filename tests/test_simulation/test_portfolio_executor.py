@@ -12,7 +12,15 @@ from crypto_bot.storage.db import Database, Repositories
 
 
 def _config(**overrides) -> Config:
-    settings = Settings.model_validate({**Settings().model_dump(), **overrides})
+    """Default config with market execution for backward compatibility with tests.
+    
+    MR v4 explicitly overrides to post_only in its pre-registration config.
+    """
+    base = Settings().model_dump()
+    base.setdefault("portfolio", {}).setdefault("mean_reversion", {})
+    base["portfolio"]["mean_reversion"]["entry_execution"] = "market"
+    base["portfolio"]["mean_reversion"]["exit_execution"] = "market"
+    settings = Settings.model_validate({**base, **overrides})
     return Config(settings=settings, env=EnvConfig())
 
 
@@ -21,6 +29,7 @@ def _config_post_only(**overrides) -> Config:
     base = Settings().model_dump()
     base.update(overrides)
     base.setdefault("portfolio", {}).setdefault("mean_reversion", {})
+    base["portfolio"]["strategy_name"] = "mean_reversion_v0"
     base["portfolio"]["mean_reversion"]["entry_execution"] = "post_only"
     base["portfolio"]["mean_reversion"]["exit_execution"] = "post_only"
     settings = Settings.model_validate({**base, **overrides})
@@ -145,6 +154,8 @@ class TestOpenPosition:
                 "risk": {**Settings().model_dump()["risk"], "max_open_positions": 1},
             }
         )
+        settings.portfolio.mean_reversion.entry_execution = "market"
+        settings.portfolio.mean_reversion.exit_execution = "market"
         config = Config(settings=settings, env=EnvConfig())
         db = Database(tmp_path / "maxpos.db")
         ex = PortfolioExecutor(config, Repositories(db))
@@ -316,7 +327,8 @@ class TestPostOnlyExecution:
 
         # Bar touches target (high >= 101.0 for LONG exit)
         results = ex.process_post_only_exits(
-            "BTC/USDT", "1h", low=100.5, high=101.5, timestamp_ms=1_700_007_200_000
+            "BTC/USDT", "1h", low=100.5, high=101.5, timestamp_ms=1_700_007_200_000,
+            close=101.2,
         )
         assert len(results) == 1
         assert results[0].handled
@@ -357,7 +369,8 @@ class TestPostOnlyExecution:
 
         # Advance time beyond 4h timeout, bar never touches target
         results = ex.process_post_only_exits(
-            "BTC/USDT", "1h", low=100.0, high=100.5, timestamp_ms=1_700_018_001_000  # 4h + 1s later
+            "BTC/USDT", "1h", low=100.0, high=100.5, timestamp_ms=1_700_018_001_000,  # 4h + 1s later
+            close=100.2,
         )
         assert len(results) == 1  # Fallback executed
         assert results[0].handled

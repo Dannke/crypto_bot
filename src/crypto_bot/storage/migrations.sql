@@ -92,7 +92,7 @@ CREATE TABLE IF NOT EXISTS positions (
     take          REAL    NOT NULL,
     status        TEXT    NOT NULL DEFAULT 'open'
                   CHECK (status IN ('proposed','open','closed','rejected','cancelled')),
-    closed_by     TEXT        CHECK (closed_by IS NULL OR closed_by IN ('stop_loss','take_profit','manual','signal','emergency_drawdown','rebalance','timeout_fallback')),
+    closed_by     TEXT        CHECK (closed_by IS NULL OR closed_by IN ('stop_loss','take_profit','manual','signal','emergency_drawdown','rebalance','timeout_fallback','reversion','time_stop')),
     opened_at_ms  INTEGER NOT NULL,
     closed_at_ms  INTEGER,
     exit_price    REAL,
@@ -173,3 +173,22 @@ CREATE INDEX IF NOT EXISTS idx_funding_payments_time
 -- ---- schema version ---------------------------------------------------------
 INSERT INTO schema_meta (key, value) VALUES ('schema_version', '8')
     ON CONFLICT(key) DO UPDATE SET value='8';
+
+-- v9: add state table for orchestrator persistence (R8)
+CREATE TABLE IF NOT EXISTS state (
+    key           TEXT    PRIMARY KEY,
+    value         TEXT    NOT NULL,
+    updated_at    INTEGER NOT NULL
+);
+INSERT INTO schema_meta (key, value) VALUES ('schema_version', '9')
+    ON CONFLICT(key) DO UPDATE SET value='9';
+
+-- v10: add 'reversion' and 'time_stop' to positions.closed_by CHECK constraint
+-- These are new close reasons from MeanReversionStrategy (reversion exit / time-stop)
+-- SQLite requires table recreation to modify CHECK constraints
+INSERT INTO schema_meta (key, value) VALUES ('schema_version', '10')
+    ON CONFLICT(key) DO UPDATE SET value='10';
+
+-- v10 migration: recreate positions table with updated CHECK constraint
+-- This runs only when upgrading from schema_version < 10
+-- The actual table recreation happens in _migrate_v10 in db.py

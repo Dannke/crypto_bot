@@ -113,9 +113,9 @@ class TestRegimeExposureScaling:
     """Tests for regime-based exposure scaling."""
 
     def test_trend_low_vol_full_exposure(self):
-        """trend_low_vol should allow full exposure (multiplier 1.0)."""
+        """trend_low_vol should allow full exposure (multiplier 1.0) for strategies with overrides."""
         fusion = RegimeGatedFusion()
-        intent = _make_intent("LONG", 0.5)
+        intent = _make_intent("LONG", 0.5, strategy_name="mean_reversion_v0")
 
         from crypto_bot.portfolio.models import RegimeSnapshot
         regime = RegimeSnapshot(
@@ -127,13 +127,38 @@ class TestRegimeExposureScaling:
         )
 
         fused = fusion.fuse([intent], regime)
-        # Weight should be unchanged (multiplier 1.0)
+        # Weight should be unchanged (multiplier 1.0 for trend_low_vol)
+        assert abs(fused.intents[0].target_weight - 0.5) < 1e-6
+
+    def test_trend_low_vol_no_gating_for_strategies_without_overrides(self):
+        """Strategies without overrides get full exposure (multiplier 1.0) in all regimes."""
+        fusion = RegimeGatedFusion()
+        intent = _make_intent("LONG", 0.5, strategy_name="cross_sectional_momentum_v0")
+
+        from crypto_bot.portfolio.models import RegimeSnapshot
+        regime = RegimeSnapshot(
+            as_of_ms=1_700_000_000_000,
+            regime="trend_low_vol",
+            trend_strength=0.5,
+            vol_percentile=0.5,
+            reference_universe=("BTC/USDT",),
+        )
+
+        fused = fusion.fuse([intent], regime)
+        # Weight should be unchanged (no regime gating for strategies without overrides)
         assert abs(fused.intents[0].target_weight - 0.5) < 1e-6
 
     def test_trend_high_vol_half_exposure(self):
-        """trend_high_vol should halve exposure (multiplier 0.5)."""
-        fusion = RegimeGatedFusion()
-        intent = _make_intent("LONG", 0.5)
+        """trend_high_vol should halve exposure (multiplier 0.5) for strategies with overrides."""
+        # Need to explicitly provide overrides for mean_reversion_v0 to test regime gating
+        fusion = RegimeGatedFusion(
+            strategy_overrides={
+                "mean_reversion_v0": {
+                    "trend_high_vol": 0.5,
+                }
+            }
+        )
+        intent = _make_intent("LONG", 0.5, strategy_name="mean_reversion_v0")
 
         from crypto_bot.portfolio.models import RegimeSnapshot
         regime = RegimeSnapshot(
@@ -145,13 +170,37 @@ class TestRegimeExposureScaling:
         )
 
         fused = fusion.fuse([intent], regime)
-        # Weight should be halved (multiplier 0.5)
+        # Weight should be halved (multiplier 0.5 for trend_high_vol with override)
         assert abs(fused.intents[0].target_weight - 0.25) < 1e-6
 
-    def test_range_low_vol_quarter_exposure(self):
-        """range_low_vol should quarter exposure (multiplier 0.25)."""
+    def test_trend_high_vol_no_gating_for_strategies_without_overrides(self):
+        """Strategies without overrides get full exposure in trend_high_vol."""
         fusion = RegimeGatedFusion()
-        intent = _make_intent("LONG", 0.5)
+        intent = _make_intent("LONG", 0.5, strategy_name="cross_sectional_momentum_v0")
+
+        from crypto_bot.portfolio.models import RegimeSnapshot
+        regime = RegimeSnapshot(
+            as_of_ms=1_700_000_000_000,
+            regime="trend_high_vol",
+            trend_strength=0.5,
+            vol_percentile=0.9,
+            reference_universe=("BTC/USDT",),
+        )
+
+        fused = fusion.fuse([intent], regime)
+        # Weight should be unchanged (no regime gating for strategies without overrides)
+        assert abs(fused.intents[0].target_weight - 0.5) < 1e-6
+
+    def test_range_low_vol_quarter_exposure(self):
+        """range_low_vol should quarter exposure (multiplier 0.25) for strategies with overrides."""
+        fusion = RegimeGatedFusion(
+            strategy_overrides={
+                "mean_reversion_v0": {
+                    "range_low_vol": 0.25,
+                }
+            }
+        )
+        intent = _make_intent("LONG", 0.5, strategy_name="mean_reversion_v0")
 
         from crypto_bot.portfolio.models import RegimeSnapshot
         regime = RegimeSnapshot(
@@ -163,13 +212,37 @@ class TestRegimeExposureScaling:
         )
 
         fused = fusion.fuse([intent], regime)
-        # Weight should be quartered (multiplier 0.25)
+        # Weight should be quartered (multiplier 0.25 for range_low_vol with override)
         assert abs(fused.intents[0].target_weight - 0.125) < 1e-6
 
-    def test_range_high_vol_zero_exposure(self):
-        """range_high_vol should zero exposure (multiplier 0.0) -> position excluded."""
+    def test_range_low_vol_no_gating_for_strategies_without_overrides(self):
+        """Strategies without overrides get full exposure in range_low_vol."""
         fusion = RegimeGatedFusion()
-        intent = _make_intent("LONG", 0.5)
+        intent = _make_intent("LONG", 0.5, strategy_name="cross_sectional_momentum_v0")
+
+        from crypto_bot.portfolio.models import RegimeSnapshot
+        regime = RegimeSnapshot(
+            as_of_ms=1_700_000_000_000,
+            regime="range_low_vol",
+            trend_strength=-0.5,
+            vol_percentile=0.5,
+            reference_universe=("BTC/USDT",),
+        )
+
+        fused = fusion.fuse([intent], regime)
+        # Weight should be unchanged (no regime gating for strategies without overrides)
+        assert abs(fused.intents[0].target_weight - 0.5) < 1e-6
+
+    def test_range_high_vol_zero_exposure(self):
+        """range_high_vol should zero exposure (multiplier 0.0) -> position excluded for strategies with overrides."""
+        fusion = RegimeGatedFusion(
+            strategy_overrides={
+                "mean_reversion_v0": {
+                    "range_high_vol": 0.0,
+                }
+            }
+        )
+        intent = _make_intent("LONG", 0.5, strategy_name="mean_reversion_v0")
 
         from crypto_bot.portfolio.models import RegimeSnapshot
         regime = RegimeSnapshot(
@@ -184,12 +257,36 @@ class TestRegimeExposureScaling:
         # With multiplier 0.0, the position should be excluded entirely
         assert len(fused.intents) == 0
 
+    def test_range_high_vol_no_gating_for_strategies_without_overrides(self):
+        """Strategies without overrides get full exposure in range_high_vol."""
+        fusion = RegimeGatedFusion()
+        intent = _make_intent("LONG", 0.5, strategy_name="cross_sectional_momentum_v0")
+
+        from crypto_bot.portfolio.models import RegimeSnapshot
+        regime = RegimeSnapshot(
+            as_of_ms=1_700_000_000_000,
+            regime="range_high_vol",
+            trend_strength=-0.5,
+            vol_percentile=0.9,
+            reference_universe=("BTC/USDT",),
+        )
+
+        fused = fusion.fuse([intent], regime)
+        # Weight should be unchanged (no regime gating for strategies without overrides)
+        assert abs(fused.intents[0].target_weight - 0.5) < 1e-6
+
     def test_short_positions_scaled_same_as_long(self):
         """Short positions should be scaled with same multipliers as longs."""
-        fusion = RegimeGatedFusion()
+        fusion = RegimeGatedFusion(
+            strategy_overrides={
+                "mean_reversion_v0": {
+                    "trend_high_vol": 0.5,
+                }
+            }
+        )
 
-        # Test long in trend_high_vol
-        intent_long = _make_intent("LONG", 0.5)
+        # Test long in trend_high_vol with override
+        intent_long = _make_intent("LONG", 0.5, strategy_name="mean_reversion_v0")
         from crypto_bot.portfolio.models import RegimeSnapshot
         regime_high = RegimeSnapshot(
             as_of_ms=1_700_000_000_000,
@@ -198,15 +295,33 @@ class TestRegimeExposureScaling:
             vol_percentile=0.9,
             reference_universe=("BTC/USDT",),
         )
-        fused_long = RegimeGatedFusion().fuse([intent_long], regime_high)
+        fused_long = RegimeGatedFusion(
+            strategy_overrides={
+                "mean_reversion_v0": {
+                    "trend_high_vol": 0.5,
+                }
+            }
+        ).fuse([intent_long], regime_high)
 
-        # Test short in trend_high_vol
-        intent_short = _make_intent("SHORT", 0.5)
-        fused_short = RegimeGatedFusion().fuse([intent_short], regime_high)
+        # Test short in trend_high_vol with override
+        intent_short = _make_intent("SHORT", 0.5, strategy_name="mean_reversion_v0")
+        fused_short = RegimeGatedFusion(
+            strategy_overrides={
+                "mean_reversion_v0": {
+                    "trend_high_vol": 0.5,
+                }
+            }
+        ).fuse([intent_short], regime_high)
 
-        # Both should be scaled by same multiplier (0.5)
+        # Both should be scaled by same multiplier (0.5 for MR with override)
         assert abs(fused_long.intents[0].target_weight - 0.25) < 1e-6
         assert abs(fused_short.intents[0].target_weight - 0.25) < 1e-6
+
+        # Test short in trend_high_vol without override (should be 1.0 for CSM)
+        intent_short_no_override = _make_intent("SHORT", 0.5, strategy_name="cross_sectional_momentum_v0")
+        fused_short_no_override = RegimeGatedFusion().fuse([intent_short_no_override], regime_high)
+        assert abs(fused_short_no_override.intents[0].target_weight - 0.5) < 1e-6
+
 
     def test_per_strategy_override(self):
         """Per-strategy overrides should be used instead of defaults."""
@@ -248,7 +363,7 @@ class TestRegimeExposureScaling:
         assert abs(fused2.intents[0].target_weight - 0.5) < 1e-6  # 0.5 * 1.0
 
     def test_fallback_to_defaults_when_no_override(self):
-        """Strategies without overrides should use default multipliers."""
+        """Strategies without overrides should get 1.0 multiplier (no regime gating)."""
         fusion = RegimeGatedFusion(
             strategy_overrides={
                 "mean_reversion_v0": {
@@ -258,7 +373,6 @@ class TestRegimeExposureScaling:
         )
         intent = _make_intent("LONG", 0.5, strategy_name="cross_sectional_momentum_v0")
 
-        # CSM has no override, should use default (1.0 for trend_low_vol)
         from crypto_bot.portfolio.models import RegimeSnapshot
         regime_trend = RegimeSnapshot(
             as_of_ms=1_700_000_000_000,
@@ -268,7 +382,7 @@ class TestRegimeExposureScaling:
             reference_universe=("BTC/USDT",),
         )
         fused = fusion.fuse([intent], regime_trend)
-        assert abs(fused.intents[0].target_weight - 0.5) < 1e-6  # 0.5 * 1.0
+        assert abs(fused.intents[0].target_weight - 0.5) < 1e-6  # 0.5 * 1.0 (no override for CSM)
 
 
 if __name__ == "__main__":

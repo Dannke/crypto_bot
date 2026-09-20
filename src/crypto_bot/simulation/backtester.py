@@ -265,7 +265,7 @@ class Backtester:
         )
         self._repos.equity.insert(
             currency=self._quote, equity=equity_now,
-            drawdown_pct=None, mode=Mode.PAPER, ts_ms=as_of,
+            drawdown_pct=0.0, mode=Mode.PAPER, ts_ms=as_of,
         )
 
     async def run_async(self) -> PnLSummary:
@@ -401,6 +401,12 @@ class Backtester:
                         self._executor.close_all_positions(
                             "emergency_drawdown", current_prices, closed_at_ms=as_of,
                         )
+
+                # Post-only: заявки, размещённые на прошлых барах, получают шанс
+                # исполниться на текущем — до того, как будет принято новое
+                # решение. Без этого вызова они висят вечно, и стратегия с
+                # entry_execution=post_only не совершает ни одной сделки.
+                self._process_post_only(as_of)
 
                 # Pipeline — skip entirely if halted (flag already set)
                 if not self._emergency_halt_triggered:
@@ -621,6 +627,29 @@ class Backtester:
             report.net_exposure,
         )
 
+    def _process_post_only(self, as_of: int) -> None:
+        """Дать висящим post-only заявкам шанс исполниться на текущем баре.
+
+        Заявка выставляется по цене закрытия своего бара, поэтому исполниться
+        она может только на следующем. Входы исполняются по лимиту (maker),
+        выходы по истечении таймаута уходят в рынок по цене закрытия бара.
+        """
+        if self._mode != StrategyType.PORTFOLIO:
+            return
+        for symbol, tf in self._executor.pending_post_only:
+            if not self._source.is_loaded(symbol, tf):
+                continue
+            bar = self._source.slice(as_of, symbol, tf)
+            if not bar:
+                continue
+            last = bar[-1]
+            self._executor.process_post_only_entries(
+                symbol, tf, last.low, last.high, as_of,
+            )
+            self._executor.process_post_only_exits(
+                symbol, tf, last.low, last.high, as_of, close=last.close,
+            )
+
     def _rebalance_due(self, as_of: int) -> bool:
         """True when the market strategy must re-evaluate at ``as_of``."""
         if self._last_rebalance_ms is None or as_of - self._last_rebalance_ms >= self._rebalance_ms:
@@ -654,10 +683,18 @@ class Backtester:
         Positions whose (symbol, side) is still in the risk-adjusted intent
         are held untouched; everything else is closed at the latest close
         with fees, and the new intents are opened right after.
+        
+        Exit reasons are taken from the strategy's PortfolioIntent.closes field.
         """
         desired = {
             (pi.symbol, pi.side) for pi in report.adjusted_intent.intents
         }
+        
+        # Build exit reason map from strategy's closes
+        exit_reasons: dict[tuple[str, str], str] = {}
+        for symbol, timeframe, reason in report.adjusted_intent.closes:
+            exit_reasons[(symbol, timeframe)] = reason
+
         for paper_pos in list(self._executor.tracker.positions):
             if not paper_pos.is_open:
                 continue
@@ -665,17 +702,19 @@ class Backtester:
                 continue
             bar = self._source.slice(as_of, paper_pos.symbol, paper_pos.timeframe)
             exit_price = bar[-1].close if bar else paper_pos.entry_price
+            # Use strategy-provided exit reason, fallback to "rebalance"
+            reason = exit_reasons.get((paper_pos.symbol, paper_pos.timeframe), "rebalance")
             stats = self._executor.close_position_for_symbol(
                 paper_pos.symbol,
                 paper_pos.timeframe,
-                reason="rebalance",
+                reason=reason,
                 exit_price=exit_price,
                 closed_at_ms=as_of,
             )
             if stats["closed"]:
                 logger.info(
-                    "bt: rebalance close %s %s @ %.4f pnl=%.4f",
-                    paper_pos.symbol, paper_pos.timeframe, exit_price, stats["closed_pnl"],
+                    "bt: close %s %s (%s) @ %.4f pnl=%.4f",
+                    paper_pos.symbol, paper_pos.timeframe, reason, exit_price, stats["closed_pnl"],
                 )
 
     def _journal_portfolio_report(

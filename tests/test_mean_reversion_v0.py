@@ -157,6 +157,7 @@ def _mr_strategy(**kwargs) -> MeanReversionStrategy:
         "weighting": "equal",
         "top_fraction": 0.5,
         "short_fraction": 0.5,
+        "min_expected_edge_bps": 0,
     }
     defaults.update(kwargs)
     return MeanReversionStrategy(_mr_context(), ["1h"], **defaults)
@@ -407,7 +408,7 @@ class TestShortHistoryExclusion:
         # SYM_B: too few bars (only 10)
         closes_b = [100.0] * 10
         source.load_all("SYM_B/USDT", "1h", _mr_candles_from_closes(closes_b))
-
+        
         anchor = BASE_TS + 24 * PERIOD_MS
         universe = get_universe_snapshot(source, ["SYM_A/USDT", "SYM_B/USDT"], "1h", anchor)
         snapshot = get_market_snapshot(source, universe, "1h")
@@ -420,3 +421,36 @@ class TestShortHistoryExclusion:
         symbols = [i.symbol for i in intent.intents]
         assert "SYM_A/USDT" in symbols
         assert "SYM_B/USDT" not in symbols
+
+
+class TestMinExpectedEdgeBpsDimensional:
+    """Test that min_expected_edge_bps filter is dimensionally correct.
+    
+    The filter uses: expected_edge_bps = (|z| - exit_threshold) * rolling_std * 10000
+    where rolling_std is in return units (e.g., 0.008 = 0.8%).
+    
+    This test verifies the filter doesn't systematically favor cheap coins over
+    expensive ones when z-score and rolling_std are identical.
+    """
+    def test_edge_filter_not_biased_by_price(self) -> None:
+        """Filter should not favor DOGE ($0.08) over BTC ($60,000) when z and rolling_std match."""
+        # Use the existing _zscore_snapshot helper to create candles with specific z-scores
+        zscores = {
+            "BTC/USDT": 3.5,
+            "DOGE/USDT": 3.5,
+        }
+        
+        snapshot = _zscore_snapshot(zscores)
+        state = _state()
+        
+        # Use min_expected_edge_bps=10 (should pass for both since edge ~300 bps)
+        intent = _mr_strategy(min_expected_edge_bps=10, top_fraction=1.0, short_fraction=1.0).evaluate_market(
+            snapshot, state
+        )
+        
+        symbols = [i.symbol for i in intent.intents]
+        # Both should pass the edge filter (same z, same rolling_std, different prices)
+        assert "BTC/USDT" in symbols, "BTC should pass edge filter"
+        assert "DOGE/USDT" in symbols, "DOGE should pass edge filter (dimensional fix)"
+        
+        

@@ -30,6 +30,10 @@ from crypto_bot.simulation.historical_source import HistoricalCandleSource
 
 from ._shared import golden_config
 
+# Полный бэктест-прогон: минуты, не секунды. Исключается только из быстрого
+# цикла разработки (-m "not slow"), но НЕ из регрессионного прогона.
+pytestmark = pytest.mark.slow
+
 PERIOD_MS = 3_600_000
 BASE_TS = 1_700_000_000_000
 N_BARS = 240
@@ -98,6 +102,18 @@ def universe() -> dict[str, list[Candle]]:
     return _trending_universe()
 
 
+@pytest.fixture(scope="module")
+def shared_report(tmp_path_factory):
+    """Один прогон с seed=42, общий для read-only проверок ниже.
+
+    Харнесс детерминирован при фиксированных seed и вселенной, поэтому пять
+    тестов, которые лишь читают отчёт дефолтного прогона, иначе пересчитывали
+    бы один и тот же результат пять раз (~48 с каждый).  Тесты детерминизма и
+    чувствительности к seed намеренно сохраняют собственные независимые прогоны.
+    """
+    return _run(tmp_path_factory, _trending_universe())
+
+
 def _run(tmp_path_factory, universe: dict[str, list[Candle]], *, seed: int = 42):
     out_dir = tmp_path_factory.mktemp(f"baselines_{seed}")
     symbols = list(universe)
@@ -119,15 +135,15 @@ def _run(tmp_path_factory, universe: dict[str, list[Candle]], *, seed: int = 42)
 
 
 class TestSharedConditions:
-    def test_all_four_baselines_run_with_results(self, tmp_path_factory, universe) -> None:
-        report = _run(tmp_path_factory, universe)
+    def test_all_four_baselines_run_with_results(self, shared_report) -> None:
+        report = shared_report
         assert [r.name for r in report.results] == list(BASELINE_NAMES)
         assert report.by_name("single_tf").strategy_mode == StrategyType.CANDIDATE
         for name in (MOMENTUM_V0_STRATEGY_NAME, RANDOM_STRATEGY_NAME, REVERSE_MOMENTUM_STRATEGY_NAME, "csm_regime_gated"):
             assert report.by_name(name).strategy_mode == StrategyType.PORTFOLIO
 
-    def test_same_universe_period_and_capital(self, tmp_path_factory, universe) -> None:
-        report = _run(tmp_path_factory, universe)
+    def test_same_universe_period_and_capital(self, shared_report, universe) -> None:
+        report = shared_report
         assert report.symbols == tuple(universe)
         assert report.timeframes == ("1h",)
         assert report.start_ms == BASE_TS
@@ -137,15 +153,15 @@ class TestSharedConditions:
             assert r.equity_curve, f"{r.name} has no equity curve"
             assert r.equity_curve[0][1] == INITIAL_EQUITY
 
-    def test_same_risk_constraints_everywhere(self, tmp_path_factory, universe) -> None:
-        report = _run(tmp_path_factory, universe)
+    def test_same_risk_constraints_everywhere(self, shared_report) -> None:
+        report = shared_report
         for r in report.results:
             assert r.summary.total_pnl_pct == round(r.summary.total_pnl_pct, 2)  # sanity
         # max_positions=5 fixed in the harness for both layers.
         assert report.max_positions == 5
 
-    def test_report_is_renderable(self, tmp_path_factory, universe) -> None:
-        report = _run(tmp_path_factory, universe)
+    def test_report_is_renderable(self, shared_report) -> None:
+        report = shared_report
         text = format_baseline_report(report)
         assert "BASELINE COMPARISON" in text
         for name in BASELINE_NAMES:
@@ -166,8 +182,8 @@ class TestRandomBaseline:
 
 
 class TestMomentumVsBaselines:
-    def test_momentum_beats_reverse_momentum_on_trending_universe(self, tmp_path_factory, universe) -> None:
-        report = _run(tmp_path_factory, universe)
+    def test_momentum_beats_reverse_momentum_on_trending_universe(self, shared_report) -> None:
+        report = shared_report
         momentum = report.by_name(MOMENTUM_V0_STRATEGY_NAME).summary
         reverse = report.by_name(REVERSE_MOMENTUM_STRATEGY_NAME).summary
         # Persistent ranks: longs keep winning, shorts keep losing.

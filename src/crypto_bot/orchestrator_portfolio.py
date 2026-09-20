@@ -359,7 +359,7 @@ async def run_portfolio_orchestrator(config: Config) -> None:
                             executor.tracker.record_equity(datetime.now(tz=UTC), equity_now)
                             repos.equity.insert(
                                 currency=quote, equity=equity_now,
-                                drawdown_pct=None, mode=Mode.PAPER, ts_ms=now_ms,
+                                drawdown_pct=0.0, mode=Mode.PAPER, ts_ms=now_ms,
                             )
 
                     if is_paper and sim_task is None and price_sim.tracked_symbols():

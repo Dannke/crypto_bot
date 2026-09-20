@@ -53,7 +53,7 @@ class RawMetrics:
     vol_spike: float      # volume / volume_ma
 
 
-def _arrays(candles: list[Candle]) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+def _arrays(candles: list[Candle]) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Extract OHLCV columns as float64 arrays in one pass (backtest hot path)."""
     n = len(candles)
     open_a = np.empty(n, dtype="float64")

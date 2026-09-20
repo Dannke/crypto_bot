@@ -37,9 +37,9 @@ def regime_trend_strength(
         raise ValueError("threshold must be >= 0")
 
     # Convert to numpy for computation (ADX expects numpy arrays)
-    high_arr = high.values if isinstance(high, pd.Series) else np.asarray(high)
-    low_arr = low.values if isinstance(low, pd.Series) else np.asarray(low)
-    close_arr = close.values if isinstance(close, pd.Series) else np.asarray(close)
+    high_arr = np.asarray(high)
+    low_arr = np.asarray(low)
+    close_arr = np.asarray(close)
 
     if len(close_arr) < 2 * period + 1:
         return pd.Series(np.full(len(close_arr), np.nan))
@@ -110,7 +110,7 @@ def rolling_atr_percentile(
     if lookback_bars < period * 2:
         raise ValueError("lookback_bars must be >= 2 * period")
 
-    c = close.values if isinstance(close, pd.Series) else np.asarray(close)
+    c = np.asarray(close)
 
     if len(c) < lookback_bars + period + 1:
         return pd.Series(np.full(len(c), np.nan))

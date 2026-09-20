@@ -138,8 +138,8 @@ SCORE_WEIGHTS = {
 
 
 def _optimistic_score(
-    trend: float, momentum: float, volume: float, volatility: float,
-) -> float:
+    trend: pd.Series, momentum: pd.Series, volume: pd.Series, volatility: pd.Series,
+) -> pd.Series:
     """Optimistic composite score: liquidity/spread/risk assumed 1.0 (upper bound)."""
     w = SCORE_WEIGHTS
     weighted = (

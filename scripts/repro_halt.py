@@ -33,8 +33,7 @@ def fetch_candles(db_path: str, symbol: str, timeframe: str):
     db = Database(db_path)
     try:
         repo = CandleRepository(db)
-        import asyncio
-        return asyncio.run(repo.fetch_since(symbol, timeframe, since_ts=0))
+        return repo.fetch_since(symbol, timeframe, since_ms=0)
     finally:
         db.close()
 

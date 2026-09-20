@@ -78,12 +78,17 @@ class RegimeGatedFusion:
                     )
 
     def _get_multiplier(self, strategy_name: str | None, regime: str) -> float:
-        """Get the exposure multiplier for a strategy and regime."""
+        """Get the exposure multiplier for a strategy and regime.
+        
+        Strategies with explicit overrides use their per-regime multipliers.
+        Strategies without overrides get 1.0 (no regime gating).
+        """
         if strategy_name and strategy_name in self._strategy_overrides:
             override = self._strategy_overrides[strategy_name].get(regime)
             if override is not None:
                 return override
-        return self._multipliers.get(regime, 0.0)
+        # No override for this strategy -> no regime gating (multiplier 1.0)
+        return 1.0
 
     def fuse(
         self,
@@ -99,7 +104,8 @@ class RegimeGatedFusion:
             raise ValueError("intents must not be empty")
 
         # v0: only one intent expected, but merge if multiple provided
-        merged_intents: dict[tuple[str, str | None], PortfolioIntent] = {}
+        from ..portfolio.models import PositionIntent
+        merged_intents: dict[tuple[str, str | None], PositionIntent] = {}
         for intent in intents:
             for pi in intent.intents:
                 key = (pi.symbol, pi.timeframe)

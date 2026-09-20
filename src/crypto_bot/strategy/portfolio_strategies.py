@@ -7,7 +7,10 @@ from math import ceil, sqrt
 from ..core.enums import Side
 from ..core.types import Candle
 from ..portfolio.market_snapshot import MarketSnapshot
-from ..portfolio.mean_reversion_features import compute_zscore_snapshot
+from ..portfolio.mean_reversion_features import (
+    ZScoreSnapshot,
+    compute_zscore_snapshot,
+)
 from ..portfolio.models import (
     CrossSectionalFeatureSnapshot,
     PortfolioIntent,
@@ -68,6 +71,7 @@ class LongOnlyTrendPortfolioStrategy(PortfolioStrategy):
             universe=features.universe,
             strategy_name=DEFAULT_PORTFOLIO_STRATEGY_NAME,
             intents=intents,
+            closes=(),
         )
 
 
@@ -120,6 +124,7 @@ def _cross_section_intent(
         return PortfolioIntent(
             as_of_ms=snapshot.as_of_ms,
             intents=(),
+            closes=(),
             universe=UniverseSnapshot(
                 as_of_ms=snapshot.as_of_ms,
                 symbols=tuple(snapshot.candles_by_symbol),
@@ -145,6 +150,7 @@ def _cross_section_intent(
     return PortfolioIntent(
         as_of_ms=snapshot.as_of_ms,
         intents=intents,
+        closes=(),
         universe=UniverseSnapshot(
             as_of_ms=snapshot.as_of_ms,
             symbols=tuple(snapshot.candles_by_symbol),
@@ -432,11 +438,16 @@ class MeanReversionStrategy(PortfolioStrategy):
         primary_timeframes: list[str],
         *,
         zscore_window_bars: int = 48,
-        signal_lookback_bars: int = 4,
-        entry_threshold: float = 2.0,
+        signal_lookback_bars: int = 8,
+        entry_threshold: float = 3.0,
         exit_threshold: float = 0.5,
-        max_holding_bars: int = 24,
+        max_holding_bars: int = 48,
         weighting: str = "inverse_vol",
+        rebalance_hours: int = 24,
+        max_positions: int = 2,
+        entry_execution: str = "post_only",
+        exit_execution: str = "post_only",
+        min_expected_edge_bps: int = 10,
         top_fraction: float = 0.2,
         short_fraction: float | None = 0.2,
     ) -> None:
@@ -454,6 +465,16 @@ class MeanReversionStrategy(PortfolioStrategy):
             raise ValueError("max_holding_bars must be a positive integer")
         if weighting not in ("equal", "inverse_vol"):
             raise ValueError("weighting must be 'equal' or 'inverse_vol'")
+        if not isinstance(rebalance_hours, int) or rebalance_hours < 1:
+            raise ValueError("rebalance_hours must be a positive integer")
+        if not isinstance(max_positions, int) or max_positions < 1:
+            raise ValueError("max_positions must be a positive integer")
+        if entry_execution not in ("market", "post_only"):
+            raise ValueError("entry_execution must be 'market' or 'post_only'")
+        if exit_execution not in ("market", "post_only"):
+            raise ValueError("exit_execution must be 'market' or 'post_only'")
+        if not isinstance(min_expected_edge_bps, int) or min_expected_edge_bps < 0:
+            raise ValueError("min_expected_edge_bps must be a non-negative integer")
         if not isinstance(top_fraction, (int, float)) or isinstance(top_fraction, bool) or not 0.0 < top_fraction <= 1.0:
             raise ValueError("top_fraction must be in (0, 1]")
         if short_fraction is not None and (isinstance(short_fraction, bool) or not isinstance(short_fraction, (int, float)) or not 0.0 < short_fraction <= 1.0):
@@ -465,6 +486,11 @@ class MeanReversionStrategy(PortfolioStrategy):
         self._exit_threshold = float(exit_threshold)
         self._max_holding_bars = max_holding_bars
         self._weighting = weighting
+        self._rebalance_hours = rebalance_hours
+        self._max_positions = max_positions
+        self._entry_execution = entry_execution
+        self._exit_execution = exit_execution
+        self._min_expected_edge_bps = min_expected_edge_bps
         self._top_fraction = float(top_fraction)
         self._short_fraction = float(short_fraction) if short_fraction is not None else None
 
@@ -491,6 +517,26 @@ class MeanReversionStrategy(PortfolioStrategy):
     @property
     def weighting(self) -> str:
         return self._weighting
+
+    @property
+    def rebalance_hours(self) -> int:
+        return self._rebalance_hours
+
+    @property
+    def max_positions(self) -> int:
+        return self._max_positions
+
+    @property
+    def entry_execution(self) -> str:
+        return self._entry_execution
+
+    @property
+    def exit_execution(self) -> str:
+        return self._exit_execution
+
+    @property
+    def min_expected_edge_bps(self) -> int:
+        return self._min_expected_edge_bps
 
     @property
     def top_fraction(self) -> float:
@@ -532,6 +578,44 @@ class MeanReversionStrategy(PortfolioStrategy):
                 return int(age_seconds / tf_seconds)
         return None
 
+    def _filter_by_min_edge(
+        self,
+        candidates: list[str],
+        zscore_snapshot: ZScoreSnapshot,
+        snapshot: MarketSnapshot,
+        side: Side,
+    ) -> list[str]:
+        """Filter candidates by minimum expected edge in bps.
+
+        Expected edge = (abs(z) - exit_threshold) * rolling_std * 10000
+        
+        rolling_std is the standard deviation of 1-bar returns (dimensionless, e.g., 0.008 = 0.8%).
+        z_distance is dimensionless. The product gives expected return in return units.
+        Multiply by 10000 to convert to bps.
+        """
+        if not candidates:
+            return candidates
+
+        filtered = []
+        for symbol in candidates:
+            z = zscore_snapshot.zscores.get(symbol, 0.0)
+            rolling_std = zscore_snapshot.rolling_stds.get(symbol, 0.0)
+            if rolling_std <= 0:
+                continue
+
+            # Distance from exit threshold in z-score units
+            z_distance = abs(z) - self._exit_threshold
+            if z_distance <= 0:
+                continue
+
+            # Expected edge in bps (rolling_std is in return units, e.g., 0.008 = 0.8%)
+            expected_edge_bps = z_distance * rolling_std * 10000.0
+
+            if expected_edge_bps >= self._min_expected_edge_bps:
+                filtered.append(symbol)
+
+        return filtered
+
     def evaluate_market(
         self,
         snapshot: MarketSnapshot,
@@ -548,6 +632,8 @@ class MeanReversionStrategy(PortfolioStrategy):
             window_bars=self._zscore_window_bars,
             signal_lookback_bars=self._signal_lookback_bars,
         )
+
+        closes: list[tuple[str, str, str]] = []
 
         # Rank by z-score ascending (most negative first = oversold = LONG)
         ranked = sorted(
@@ -568,6 +654,17 @@ class MeanReversionStrategy(PortfolioStrategy):
             symbol for symbol, z in ranked[-n_short:]
             if z >= self._entry_threshold
         ]
+
+        # Apply min_expected_edge_bps filter
+        if self._min_expected_edge_bps > 0:
+            # Estimate expected edge for each candidate
+            # Edge = (abs(z) - exit_threshold) * rolling_std / price * 10000 bps
+            long_candidates = self._filter_by_min_edge(
+                long_candidates, zscore_snapshot, snapshot, Side.LONG
+            )
+            short_candidates = self._filter_by_min_edge(
+                short_candidates, zscore_snapshot, snapshot, Side.SHORT
+            )
 
         # Determine which existing positions to keep (not exited)
         # Exit conditions: |z| <= exit_threshold (reversion) OR age >= max_holding_bars (time-stop)
@@ -591,10 +688,13 @@ class MeanReversionStrategy(PortfolioStrategy):
 
             # Check exit conditions
             exited = False
+            exit_reason = ""
             if abs(z) <= self._exit_threshold:
-                exited = True  # reversion exit
+                exited = True
+                exit_reason = "reversion"
             elif age_bars is not None and age_bars >= self._max_holding_bars:
-                exited = True  # time-stop exit
+                exited = True
+                exit_reason = "time_stop"
 
             if not exited:
                 if position.side == Side.LONG:
@@ -603,6 +703,7 @@ class MeanReversionStrategy(PortfolioStrategy):
                     keep_short.append(symbol)
             else:
                 exited_symbols.add(symbol)
+                closes.append((symbol, snapshot.timeframe, exit_reason))
 
         # Exclude exited symbols from new entry candidates (prevent immediate re-entry)
         long_candidates = [s for s in long_candidates if s not in exited_symbols]
@@ -616,6 +717,7 @@ class MeanReversionStrategy(PortfolioStrategy):
             return PortfolioIntent(
                 as_of_ms=snapshot.as_of_ms,
                 intents=(),
+                closes=tuple(closes),
                 universe=UniverseSnapshot(
                     as_of_ms=snapshot.as_of_ms,
                     symbols=tuple(snapshot.candles_by_symbol),
@@ -650,6 +752,7 @@ class MeanReversionStrategy(PortfolioStrategy):
         return PortfolioIntent(
             as_of_ms=snapshot.as_of_ms,
             intents=intents,
+            closes=tuple(closes),
             universe=UniverseSnapshot(
                 as_of_ms=snapshot.as_of_ms,
                 symbols=tuple(snapshot.candles_by_symbol),

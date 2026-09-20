@@ -25,6 +25,7 @@ import asyncio
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
+from typing import overload
 
 from ..config.env import Config
 from ..config.schemas import RegimeConfig
@@ -100,10 +101,22 @@ class WalkForwardResult:
         print(f"  Hint:   {self._overfit_hint()}")
 
 
+@overload
 def calendar_split(
     candles: list[Candle], period_ms: int, ratio: float,
     three_way: bool = False, validation_ratio: float = 0.2
-) -> tuple[int, int, int, int]:
+) -> tuple[int, int, int, int]: ...
+
+@overload
+def calendar_split(
+    candles: list[Candle], period_ms: int, ratio: float,
+    three_way: bool = True, validation_ratio: float = 0.2
+) -> tuple[int, int, int, int, int, int]: ...
+
+def calendar_split(
+    candles: list[Candle], period_ms: int, ratio: float,
+    three_way: bool = False, validation_ratio: float = 0.2
+) -> tuple[int, int, int, int] | tuple[int, int, int, int, int, int]:
     """Split candles into train/test windows by calendar time.
 
     Args:
@@ -156,8 +169,8 @@ async def _run_single_window(
     symbols: list[str],
     timeframe: str,
     source: HistoricalCandleSource,
-    start_ms: int,
-    end_ms: int,
+    start_ms: int | None,
+    end_ms: int | None,
     *,
     strategy_mode: StrategyType,
     portfolio_limits: PortfolioRiskLimits | None = None,
@@ -171,6 +184,9 @@ async def _run_single_window(
 ) -> PnLSummary:
     """Run a single backtest window."""
     from ..storage.db import Database
+
+    if start_ms is None or end_ms is None:
+        raise ValueError("start_ms and end_ms must be provided for _run_single_window")
 
     if db_path is None:
         with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as tmp:
@@ -204,7 +220,7 @@ async def _run_single_window(
             cost_model = CompositeCostModel.bybit_perp_default()
     else:
         cost_model = CompositeCostModel.legacy_default()
-    bt._executor._costs = cost_model
+    bt._executor._costs = cost_model  # type: ignore[attr-defined]
     return await bt.run_async()
 
 
@@ -269,12 +285,14 @@ def run_walk_forward(
             candles, period_ms, split_ratio, three_way=True, validation_ratio=validation_ratio
         )
     else:
-        train_start, train_end, test_start, test_end = calendar_split(candles, period_ms, split_ratio)
+        result = calendar_split(candles, period_ms, split_ratio)
+        assert len(result) == 4, "Expected 4-tuple for 2-way split"
+        train_start, train_end, test_start, test_end = result  # type: ignore[assignment]
         val_start = val_end = None
 
     # Count bars in each window
     train_candles = [c for c in candles if train_start <= c.timestamp < train_end]
-    val_candles = [c for c in candles if val_start is not None and val_start <= c.timestamp < val_end]
+    val_candles = [c for c in candles if val_start is not None and val_end is not None and val_start <= c.timestamp < val_end]
     test_candles = [c for c in candles if test_start <= c.timestamp < test_end]
 
     # Build db paths if requested
@@ -358,7 +376,7 @@ def run_walk_forward(
     )
 
 
-async def fetch_all_candles(db_path: str, symbols: list[str], timeframe: str) -> dict[str, list[Candle]]:
+def fetch_all_candles(db_path: str, symbols: list[str], timeframe: str) -> dict[str, list[Candle]]:
     """Fetch all candles for multiple symbols from the database."""
     from ..storage.db import CandleRepository
 
@@ -367,7 +385,7 @@ async def fetch_all_candles(db_path: str, symbols: list[str], timeframe: str) ->
         repo = CandleRepository(db)
         result = {}
         for sym in symbols:
-            candles = await repo.fetch_since(sym, timeframe, since_ts=0)
+            candles = repo.fetch_since(sym, timeframe, since_ms=0)
             result[sym] = candles
         return result
     finally:

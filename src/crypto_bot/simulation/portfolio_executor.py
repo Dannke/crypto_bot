@@ -69,10 +69,18 @@ class PortfolioExecutor:
         # Track rejected intents for renormalization
         self._rejected_intents: list[PositionIntent] = []
         
-        # Post-only execution config (MR v3)
+        # Post-only execution config (MR v3).
+        # entry_execution/exit_execution принадлежат блоку mean_reversion, поэтому
+        # применяются только когда активна именно эта стратегия. Без этого условия
+        # MR-настройка протекает в CSM/momentum/baselines и уводит их в ветку
+        # post-only, которая не исполняет заявки (см. walk_forward.py:217 — там
+        # такой же гейт по strategy_name).
         mr = getattr(self._settings.portfolio, 'mean_reversion', None)
-        self._post_only_entry = getattr(mr, 'entry_execution', None) == 'post_only'
-        self._post_only_exit = getattr(mr, 'exit_execution', None) == 'post_only'
+        mr_is_active = (
+            getattr(self._settings.portfolio, 'strategy_name', None) == 'mean_reversion_v0'
+        )
+        self._post_only_entry = mr_is_active and getattr(mr, 'entry_execution', None) == 'post_only'
+        self._post_only_exit = mr_is_active and getattr(mr, 'exit_execution', None) == 'post_only'
         self._post_only_entry_timeout_hours = 1
         self._post_only_exit_timeout_hours = 4
         self._pending_post_only_entries: dict[str, dict] = {}  # symbol -> {limit_price, side, timestamp, intent}
@@ -97,6 +105,14 @@ class PortfolioExecutor:
     def clear_rejected_intents(self) -> None:
         """Clear rejected intents for the next rebalance cycle."""
         self._rejected_intents.clear()
+
+    def handle_selected(self, report, *, current_prices: dict | None = None):
+        """Compatibility stub for candidate-mode interface (not used in portfolio mode)."""
+        pass
+
+    def handle_rejected_many(self, reports: list) -> None:
+        """Compatibility stub for candidate-mode interface (not used in portfolio mode)."""
+        pass
 
     def open_position(
         self,
@@ -251,6 +267,20 @@ class PortfolioExecutor:
             entry_price=entry,
         )
 
+    @property
+    def pending_post_only(self) -> tuple[tuple[str, str], ...]:
+        """(symbol, timeframe) pairs that still have an unfilled post-only order.
+
+        The backtester needs this to know which bars to feed back in, without
+        reaching into the executor's private pending dicts.
+        """
+        keys = set(self._pending_post_only_entries) | set(
+            getattr(self, "_pending_post_only_exits", {})
+        )
+        return tuple(
+            (sym, tf) for sym, _, tf in (k.partition(":") for k in sorted(keys))
+        )
+
     def process_post_only_entries(
         self,
         symbol: str,
@@ -274,11 +304,14 @@ class PortfolioExecutor:
         intent = pending['intent']
         limit_price = pending['limit_price']
         side = pending['side']
-        timestamp_ms = pending['timestamp_ms']
+        # Время размещения заявки. Раньше оно записывалось в timestamp_ms и
+        # затирало параметр функции, из-за чего проверка таймаута сравнивала
+        # число с самим собой и не срабатывала никогда.
+        order_timestamp_ms = pending['timestamp_ms']
 
         # Check timeout
         timeout_ms = self._post_only_entry_timeout_hours * 3600 * 1000
-        if timestamp_ms - timestamp_ms > timeout_ms:
+        if timestamp_ms - order_timestamp_ms > timeout_ms:
             # Timeout - cancel post-only order
             logger.info(
                 "portfolio: cancelled post-only %s %s %s (timeout)",
@@ -291,6 +324,19 @@ class PortfolioExecutor:
         filled = side == Side.LONG and low <= limit_price or side == Side.SHORT and high >= limit_price
 
         if not filled:
+            return results
+
+        # open_position() выходит для post-only до проверки лимита позиций,
+        # поэтому к моменту фактического исполнения книга может быть уже полна —
+        # проверяем ещё раз здесь, иначе post-only обходит max_open_positions.
+        open_positions = [p for p in self._tracker.positions if p.is_open]
+        if len(open_positions) >= self._settings.risk.max_open_positions:
+            logger.info(
+                "portfolio: cancelled post-only %s %s %s — max positions reached (%d >= %d)",
+                side.value, symbol, timeframe,
+                len(open_positions), self._settings.risk.max_open_positions,
+            )
+            del self._pending_post_only_entries[key]
             return results
 
         # Fill the order - execute at limit price (maker)
@@ -545,12 +591,16 @@ class PortfolioExecutor:
         low: float,
         high: float,
         timestamp_ms: int,
+        *,
+        close: float,
     ) -> list[PortfolioExecutionResult]:
         """Check and fill pending post-only exit orders.
 
         Fill logic: for LONG, fill if bar's high >= limit_price.
         For SHORT, fill if bar's low <= limit_price.
-        Timeout: cancel if not filled within post_only_exit_timeout_hours, fallback to market.
+        Timeout: fall back to a market exit at ``close`` (the bar's close), which
+        is why the caller must supply it — closing at the entry price instead
+        would force every timed-out trade to report exactly zero gross PnL.
         """
         results = []
         key = f"{symbol}:{timeframe}"
@@ -568,18 +618,19 @@ class PortfolioExecutor:
         # Check timeout
         timeout_ms = self._post_only_exit_timeout_hours * 3600 * 1000
         if timestamp_ms - order_timestamp_ms > timeout_ms:
-# Timeout - fallback to market execution
+            # Timeout - fallback to market execution
             logger.info(
                 "portfolio: post-only exit %s %s %s timeout, fallback to market",
                 side.value, symbol, timeframe
             )
             del pending_exits[key]
-            # Execute fallback at market price (taker)
+            # Execute fallback at market price (taker). Рыночный выход исполняется
+            # по цене бара, на котором обнаружен таймаут, а не по цене входа.
             fallback_fee_abs = self._costs.calculate(
-                paper_pos.size, paper_pos.entry_price, side, is_maker=False, spread_pct=0.0
+                paper_pos.size, close, side, is_maker=False, spread_pct=0.0
             ).fee_abs
             self._tracker.close_position(
-                paper_pos, paper_pos.entry_price, closed_by="timeout_fallback", exit_fee_abs=fallback_fee_abs
+                paper_pos, close, closed_by="timeout_fallback", exit_fee_abs=fallback_fee_abs
             )
             for db_pos in self._repos.positions.list_open():
                 if (
@@ -589,7 +640,7 @@ class PortfolioExecutor:
                 ):
                     self._repos.positions.close(
                         position_id=db_pos.id,
-                        exit_price=paper_pos.entry_price,
+                        exit_price=close,
                         pnl_pct=paper_pos.pnl_pct or 0.0,
                         closed_by="timeout_fallback",
                         closed_at_ms=timestamp_ms,
@@ -600,7 +651,7 @@ class PortfolioExecutor:
                 f"filled post-only exit {side.value} {symbol} {timeframe} (timeout fallback)",
                 symbol,
                 size=paper_pos.size,
-                entry_price=paper_pos.entry_price,
+                entry_price=close,
             )]
 
         # Check fill condition

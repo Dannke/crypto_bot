@@ -25,6 +25,9 @@ class Candle:
     low: float
     close: float
     volume: float
+    # Optional fields for storage/database round-trips
+    symbol: str = ""
+    timeframe: str = ""
 
 
 @dataclass(slots=True)

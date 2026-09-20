@@ -486,6 +486,30 @@ class TestCorrelationFilter:
         assert len(report.position_results) == 6
         assert all(r.accepted for r in report.position_results)
 
+    def test_preserves_closes_field(self):
+        """Risk engine should preserve closes field in adjusted_intent."""
+        intent = _intent(
+            _position("BTC/USDT", Side.LONG, 0.3),
+            _position("ETH/USDT", Side.SHORT, 0.3),
+        )
+        # Add some close reasons
+        from crypto_bot.portfolio.models import PortfolioIntent
+        intent_with_closes = PortfolioIntent(
+            as_of_ms=intent.as_of_ms,
+            intents=intent.intents,
+            universe=intent.universe,
+            strategy_name=intent.strategy_name,
+            closes=(("BTC/USDT", "1h", "reversion"), ("ETH/USDT", "1h", "time_stop")),
+        )
+        
+        report = PortfolioRiskEngine(
+            _limits()
+        ).evaluate(intent_with_closes, _state())
+        
+        # closes field should be preserved
+        assert report.adjusted_intent.closes == (("BTC/USDT", "1h", "reversion"), ("ETH/USDT", "1h", "time_stop"))
+
+
     def test_no_features_bypasses_filter(self) -> None:
         """Without features, filter is bypassed (conservative)."""
         intent = _intent(

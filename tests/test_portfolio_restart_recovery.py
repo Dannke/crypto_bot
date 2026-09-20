@@ -33,7 +33,14 @@ def temp_db():
     with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
         db_path = f.name
     yield db_path
-    Path(db_path).unlink(missing_ok=True)
+    # Windows fix: retry deletion with small delay to allow DB connections to close
+    import time
+    for _ in range(10):
+        try:
+            Path(db_path).unlink(missing_ok=True)
+            break
+        except PermissionError:
+            time.sleep(0.1)
 
 
 @pytest.fixture

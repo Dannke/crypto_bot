@@ -36,10 +36,9 @@ def _iso_to_ms(value: str) -> int:
 
 
 def _fetch_candles(db_path: str, symbol: str, timeframe: str):
-    import asyncio
     db = Database(db_path)
     try:
-        return asyncio.run(CandleRepository(db).fetch_since(symbol, timeframe, since_ts=0))
+        return CandleRepository(db).fetch_since(symbol, timeframe, since_ms=0)
     finally:
         db.close()
 

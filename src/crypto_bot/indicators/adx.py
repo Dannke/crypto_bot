@@ -44,7 +44,11 @@ def adx(
     plus_di = 100.0 * p_dm_ema / atr_
     minus_di = 100.0 * m_dm_ema / atr_
     di_sum = plus_di + minus_di
-    dx = np.where(di_sum == 0.0, np.nan, 100.0 * np.abs(plus_di - minus_di) / di_sum)
+    # np.where вычисляет обе ветки целиком, поэтому деление выполнялось и при
+    # di_sum == 0 — отсюда RuntimeWarning на каждом таком баре. np.divide с
+    # where= считает только там, где знаменатель ненулевой; остальное остаётся NaN.
+    dx = np.full(di_sum.shape, np.nan, dtype=float)
+    np.divide(100.0 * np.abs(plus_di - minus_di), di_sum, out=dx, where=di_sum != 0.0)
     adx_series = ewm_mean(dx, alpha, period)
     return pd.Series(adx_series)
 

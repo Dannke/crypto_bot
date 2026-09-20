@@ -1,58 +1,23 @@
-"""SQLite storage layer: connection management + typed repositories.
-
-Design goals:
-  * Swappable backend. All SQL lives here; the rest of the app talks to
-    repository methods returning core domain types. Replacing SQLite with
-    Postgres means implementing the same repository protocols elsewhere.
-  * Safety. ``foreign_keys`` and ``WAL`` are enabled per-connection; schema
-    migrations run in a transaction and stamp a version row.
-  * Testability. The repositories take an open ``sqlite3.Connection`` (sync) so
-    unit tests can pass an in-memory DB without spinning up files or network.
-
-Synchronous deliberately: storage calls happen off the hot async path (the
-orchestrator persists after the scan), and a sync sqlite3 binding keeps the
-dependency surface to the stdlib.
-"""
+"""Database layer: SQLite persistence for candles, signals, positions, and state."""
 from __future__ import annotations
 
 import asyncio
 import sqlite3
-from collections.abc import Iterator
-from contextlib import contextmanager
-from datetime import UTC, datetime
 from pathlib import Path
 
 from ..core import policy
-from ..core.enums import Mode, OrderStatus, OrderType, RejectReason, Side, Signal, TradeStatus
+from ..core.enums import Mode, OrderStatus, OrderType, Side, TradeStatus
 from ..core.exceptions import StorageError
-from ..core.types import Candle, DecisionRecord, Position, Trade
-
-_MIGRATIONS_FILE = Path(__file__).parent / "migrations.sql"
-
-
-def _now_ms() -> int:
-    return int(datetime.now(tz=UTC).timestamp() * 1000)
-
-
-def _utc_iso() -> str:
-    return datetime.now(tz=UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+from .migrations import _MIGRATIONS_FILE
+from .models import (
+    Candle,
+    Position,
+    Trade,
+)
 
 
-def _reject_value(reason: RejectReason | None) -> str | None:
-    return reason.value if reason else None
-
-
-def _lastrowid(cur: sqlite3.Cursor) -> int:
-    if cur.lastrowid is None:
-        raise StorageError("SQLite did not return a lastrowid for insert.")
-    return int(cur.lastrowid)
-
-
-# --------------------------------------------------------------------------- #
-# Connection / migration
-# --------------------------------------------------------------------------- #
 class Database:
-    """Thin wrapper around a sqlite3 connection with PRAGMAs + migrations."""
+    """SQLite-backed storage with auto-migration."""
 
     def __init__(self, db_path: str | Path = "data/crypto_bot.db") -> None:
         self._path = Path(db_path)
@@ -66,14 +31,6 @@ class Database:
         except sqlite3.Error as exc:
             raise StorageError(f"cannot open database {self._path}: {exc}") from exc
         self._migrate()
-
-    @property
-    def conn(self) -> sqlite3.Connection:
-        return self._conn
-
-    @property
-    def db_path(self) -> Path:
-        return self._path
 
     def _migrate(self) -> None:
         try:
@@ -97,6 +54,79 @@ class Database:
         self._migrate_v7()
         # v8: add timeout_fallback to positions.closed_by CHECK constraint
         self._migrate_v8()
+        # v9: add state table for orchestrator persistence (R8)
+        self._migrate_v9()
+        # v10: add 'reversion' and 'time_stop' to positions.closed_by CHECK constraint
+        self._migrate_v10()
+
+    def _migrate_v2(self) -> None:
+        existing = self._conn.execute(
+            "SELECT value FROM schema_meta WHERE key='schema_version'"
+        ).fetchone()
+        if existing and int(existing["value"]) >= 2:
+            return
+        try:
+            self._conn.executescript("""
+                ALTER TABLE positions ADD COLUMN timeframe TEXT NOT NULL DEFAULT '';
+                ALTER TABLE positions ADD COLUMN closed_by TEXT;
+                CREATE INDEX IF NOT EXISTS idx_positions_symbol_tf_status
+                    ON positions (symbol, timeframe, status);
+                INSERT INTO schema_meta (key, value) VALUES ('schema_version', '2')
+                    ON CONFLICT(key) DO UPDATE SET value='2';
+            """)
+            self._conn.commit()
+        except sqlite3.OperationalError:
+            pass
+
+    def _migrate_v3(self) -> None:
+        existing = self._conn.execute(
+            "SELECT value FROM schema_meta WHERE key='schema_version'"
+        ).fetchone()
+        if existing and int(existing["value"]) >= 3:
+            return
+        try:
+            self._conn.executescript("""
+                ALTER TABLE decisions ADD COLUMN timeframe TEXT NOT NULL DEFAULT '';
+                INSERT INTO schema_meta (key, value) VALUES ('schema_version', '3')
+                    ON CONFLICT(key) DO UPDATE SET value='3';
+            """)
+            self._conn.commit()
+        except sqlite3.OperationalError:
+            pass
+
+    def _migrate_v4(self) -> None:
+        existing = self._conn.execute(
+            "SELECT value FROM schema_meta WHERE key='schema_version'"
+        ).fetchone()
+        if existing and int(existing["value"]) >= 4:
+            return
+        try:
+            self._conn.executescript("""
+                ALTER TABLE decisions ADD COLUMN outcome TEXT
+                    CHECK (outcome IS NULL OR outcome IN ('position_opened','drawdown_halt','slot_taken','max_positions_reached','no_position','open_unrealized_drawdown'));
+                INSERT INTO schema_meta (key, value) VALUES ('schema_version', '4')
+                    ON CONFLICT(key) DO UPDATE SET value='4';
+            """)
+            self._conn.commit()
+        except sqlite3.OperationalError:
+            pass
+
+    def _migrate_v5(self) -> None:
+        existing = self._conn.execute(
+            "SELECT value FROM schema_meta WHERE key='schema_version'"
+        ).fetchone()
+        if existing and int(existing["value"]) >= 5:
+            return
+        try:
+            self._conn.executescript("""
+                ALTER TABLE decisions ADD COLUMN outcome TEXT
+                    CHECK (outcome IS NULL OR outcome IN ('position_opened','drawdown_halt','slot_taken','max_positions_reached','no_position','open_unrealized_drawdown'));
+                INSERT INTO schema_meta (key, value) VALUES ('schema_version', '5')
+                    ON CONFLICT(key) DO UPDATE SET value='5';
+            """)
+            self._conn.commit()
+        except sqlite3.OperationalError:
+            pass
 
     def _migrate_v6(self) -> None:
         existing = self._conn.execute(
@@ -208,452 +238,488 @@ class Database:
         except sqlite3.OperationalError:
             pass
 
-    def _migrate_v2(self) -> None:
+    def _migrate_v9(self) -> None:
         existing = self._conn.execute(
             "SELECT value FROM schema_meta WHERE key='schema_version'"
         ).fetchone()
-        if existing and int(existing["value"]) >= 2:
+        if existing and int(existing["value"]) >= 9:
             return
         try:
+            # Add state table for orchestrator persistence (R8)
             self._conn.executescript("""
-                ALTER TABLE positions ADD COLUMN timeframe TEXT NOT NULL DEFAULT '';
-                ALTER TABLE positions ADD COLUMN closed_by TEXT;
-                CREATE INDEX IF NOT EXISTS idx_positions_symbol_tf_status
-                    ON positions (symbol, timeframe, status);
-                INSERT INTO schema_meta (key, value) VALUES ('schema_version', '2')
-                    ON CONFLICT(key) DO UPDATE SET value='2';
-            """)
-            self._conn.commit()
-        except sqlite3.OperationalError:
-            pass  # columns already exist
-
-    def _migrate_v3(self) -> None:
-        existing = self._conn.execute(
-            "SELECT value FROM schema_meta WHERE key='schema_version'"
-        ).fetchone()
-        if existing and int(existing["value"]) >= 3:
-            return
-        try:
-            self._conn.executescript("""
-                ALTER TABLE decisions ADD COLUMN timeframe TEXT NOT NULL DEFAULT '';
-                INSERT INTO schema_meta (key, value) VALUES ('schema_version', '3')
-                    ON CONFLICT(key) DO UPDATE SET value='3';
-            """)
-            self._conn.commit()
-        except sqlite3.OperationalError:
-            pass
-
-    def _migrate_v4(self) -> None:
-        existing = self._conn.execute(
-            "SELECT value FROM schema_meta WHERE key='schema_version'"
-        ).fetchone()
-        if existing and int(existing["value"]) >= 4:
-            return
-        try:
-            self._conn.executescript("""
-                ALTER TABLE decisions ADD COLUMN outcome TEXT
-                    CHECK (outcome IS NULL OR outcome IN (
-                        'position_opened','drawdown_halt','slot_taken',
-                        'max_positions_reached','no_position'
-                    ));
-                INSERT INTO schema_meta (key, value) VALUES ('schema_version', '4')
-                    ON CONFLICT(key) DO UPDATE SET value='4';
-            """)
-            self._conn.commit()
-        except sqlite3.OperationalError:
-            pass
-
-    def _migrate_v5(self) -> None:
-        existing = self._conn.execute(
-            "SELECT value FROM schema_meta WHERE key='schema_version'"
-        ).fetchone()
-        if existing and int(existing["value"]) >= 5:
-            return
-        try:
-            self._conn.executescript("""
-                CREATE TABLE IF NOT EXISTS decisions_v5 (
-                    id            INTEGER PRIMARY KEY AUTOINCREMENT,
-                    ts_ms         INTEGER NOT NULL,
-                    symbol        TEXT    NOT NULL,
-                    timeframe     TEXT    NOT NULL DEFAULT '',
-                    accepted      INTEGER NOT NULL CHECK (accepted IN (0,1)),
-                    reject_reason TEXT        CHECK (reject_reason IS NULL
-                                                    OR reject_reason IN (
-                        'insufficient_liquidity','spread_too_wide','volatility_out_of_range',
-                        'low_score','low_confidence','conflicting_timeframes','in_cooldown',
-                        'position_exists','blacklisted','insufficient_data',
-                        'risk_budget_exhausted','max_positions_reached','drawdown_halt',
-                        'no_direction'
-                    )),
-                    detail        TEXT,
-                    score         REAL,
-                    signal        TEXT        CHECK (signal IS NULL OR signal IN ('BUY','SELL','HOLD')),
-                    outcome       TEXT        CHECK (outcome IS NULL OR outcome IN (
-                        'position_opened','drawdown_halt','slot_taken','max_positions_reached',
-                        'no_position','open_unrealized_drawdown'
-                    )),
-                    created_at    TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+                CREATE TABLE IF NOT EXISTS state (
+                    key           TEXT    PRIMARY KEY,
+                    value         TEXT    NOT NULL,
+                    updated_at    INTEGER NOT NULL
                 );
-                INSERT INTO decisions_v5 (id, ts_ms, symbol, timeframe, accepted,
-                    reject_reason, detail, score, signal, outcome, created_at)
-                SELECT id, ts_ms, symbol, timeframe, accepted,
-                    reject_reason, detail, score, signal, outcome, created_at
-                FROM decisions;
-                DROP TABLE decisions;
-                ALTER TABLE decisions_v5 RENAME TO decisions;
-                CREATE INDEX IF NOT EXISTS idx_decisions_ts        ON decisions (ts_ms);
-                CREATE INDEX IF NOT EXISTS idx_decisions_symbol_ts ON decisions (symbol, ts_ms);
-                CREATE INDEX IF NOT EXISTS idx_decisions_accepted  ON decisions (accepted);
-                INSERT INTO schema_meta (key, value) VALUES ('schema_version', '5')
-                    ON CONFLICT(key) DO UPDATE SET value='5';
+                INSERT INTO schema_meta (key, value) VALUES ('schema_version', '9')
+                    ON CONFLICT(key) DO UPDATE SET value='9';
             """)
             self._conn.commit()
         except sqlite3.OperationalError:
             pass
+
+    def _migrate_v10(self) -> None:
+        existing = self._conn.execute(
+            "SELECT value FROM schema_meta WHERE key='schema_version'"
+        ).fetchone()
+        if existing and int(existing["value"]) >= 10:
+            return
+        try:
+            # Recreate positions table with updated closed_by CHECK constraint
+            # Added 'reversion' and 'time_stop' as valid close reasons for MeanReversionStrategy
+            self._conn.executescript("""
+                -- Create new positions table with updated closed_by CHECK constraint
+                CREATE TABLE positions_new (
+                    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                    symbol        TEXT    NOT NULL,
+                    timeframe     TEXT    NOT NULL,
+                    side          TEXT    NOT NULL CHECK (side IN ('LONG','SHORT')),
+                    size          REAL    NOT NULL,
+                    entry_price   REAL    NOT NULL,
+                    stop          REAL    NOT NULL,
+                    take          REAL    NOT NULL,
+                    status        TEXT    NOT NULL DEFAULT 'open'
+                      CHECK (status IN ('proposed','open','closed','rejected','cancelled')),
+                    closed_by     TEXT        CHECK (closed_by IS NULL OR closed_by IN ('stop_loss','take_profit','manual','signal','emergency_drawdown','rebalance','timeout_fallback','reversion','time_stop')),
+                    opened_at_ms  INTEGER NOT NULL,
+                    closed_at_ms  INTEGER,
+                    exit_price    REAL,
+                    pnl_pct       REAL,
+                    mode          TEXT    NOT NULL CHECK (mode IN ('signal_only','paper','live')),
+                    created_at    TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+                    updated_at    TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+                );
+
+                -- Copy data from old table
+                INSERT INTO positions_new (id, symbol, timeframe, side, size, entry_price, stop, take, status, closed_by, opened_at_ms, closed_at_ms, exit_price, pnl_pct, mode, created_at, updated_at)
+                SELECT id, symbol, timeframe, side, size, entry_price, stop, take, status, closed_by, opened_at_ms, closed_at_ms, exit_price, pnl_pct, mode, created_at, updated_at
+                FROM positions;
+
+                -- Drop old table and rename new
+                DROP TABLE positions;
+                ALTER TABLE positions_new RENAME TO positions;
+
+                -- Recreate indexes
+                CREATE INDEX IF NOT EXISTS idx_positions_status_symbol ON positions (status, symbol);
+                CREATE INDEX IF NOT EXISTS idx_positions_symbol_opened ON positions (symbol, opened_at_ms);
+                CREATE INDEX IF NOT EXISTS idx_positions_open ON positions (status);
+                CREATE INDEX IF NOT EXISTS idx_positions_symbol_tf_status ON positions (symbol, timeframe, status);
+
+                -- Update schema version
+                INSERT INTO schema_meta (key, value) VALUES ('schema_version', '10')
+                    ON CONFLICT(key) DO UPDATE SET value='10';
+            """)
+            self._conn.commit()
+        except sqlite3.OperationalError:
+            pass
+
+    @property
+    def conn(self) -> sqlite3.Connection:
+        return self._conn
+
+    @property
+    def path(self) -> Path:
+        return self._path
+
+    @property
+    def db_path(self) -> Path:
+        return self._path
 
     def schema_version(self) -> str:
         row = self._conn.execute(
             "SELECT value FROM schema_meta WHERE key='schema_version'"
         ).fetchone()
-        return str(row["value"]) if row else "unknown"
-
-    @contextmanager
-    def transaction(self) -> Iterator[sqlite3.Connection]:
-        """Context-managed transaction that rolls back on error."""
-        try:
-            yield self._conn
-            self._conn.commit()
-        except Exception:
-            self._conn.rollback()
-            raise
+        return row["value"] if row else "0"
 
     def close(self) -> None:
-        try:
-            self._conn.close()
-        except sqlite3.Error as exc:  # pragma: no cover - defensive
-            raise StorageError(f"error closing database: {exc}") from exc
+        self._conn.close()
 
+    def transaction(self):
+        """Return a context manager for database transactions."""
+        return self._conn
 
-# --------------------------------------------------------------------------- #
-# Candle repository
-# --------------------------------------------------------------------------- #
-class CandleRepository:
-    def __init__(self, db: Database) -> None:
-        self._db = db
+    # ---- Candles ----
 
-    # Sync methods (for tests and other sync code)
-    def upsert_many(self, symbol: str, timeframe: str, candles: list[Candle]) -> int:
-        """Synchronous upsert."""
+    def candles_upsert(
+        self,
+        symbol: str,
+        timeframe: str,
+        candles: list[Candle],
+    ) -> int:
+        """Insert or replace candles (by symbol, timeframe, timestamp)."""
         if not candles:
             return 0
-        rows = [
-            (symbol, timeframe, c.timestamp, c.open, c.high, c.low, c.close, c.volume)
-            for c in candles
-        ]
-        with self._db.transaction() as conn:
-            conn.executemany(
-                """INSERT INTO candles (symbol, timeframe, ts_ms, open, high, low, close, volume)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                   ON CONFLICT(symbol, timeframe, ts_ms) DO NOTHING""",
-                rows,
+        with self._conn:
+            self._conn.executemany(
+                """INSERT OR REPLACE INTO candles
+                   (symbol, timeframe, timestamp, open, high, low, close, volume)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                [(c.symbol, c.timeframe, c.timestamp, c.open, c.high, c.low, c.close, c.volume)
+                 for c in candles],
             )
-        return len(rows)
+        return len(candles)
 
-    def latest_ts(self, symbol: str, timeframe: str) -> int | None:
-        """Synchronous latest_ts."""
-        row = self._db.conn.execute(
-            "SELECT MAX(ts_ms) AS m FROM candles WHERE symbol=? AND timeframe=?",
+    def candles_fetch(
+        self,
+        symbol: str,
+        timeframe: str,
+        limit: int = 500,
+        since_ms: int | None = None,
+    ) -> list[Candle]:
+        """Fetch candles for a symbol/timeframe, newest first."""
+        sql = "SELECT symbol, timeframe, timestamp, open, high, low, close, volume FROM candles WHERE symbol=? AND timeframe=?"
+        params: list = [symbol, timeframe]
+        if since_ms is not None:
+            sql += " AND ts_ms >= ?"
+            params.append(since_ms)
+        sql += " ORDER BY ts_ms DESC LIMIT ?"
+        params = [symbol, timeframe, limit] if since_ms is None else [symbol, timeframe, limit, since_ms]
+        rows = self._conn.execute(sql, params).fetchall()
+        return [Candle(**row) for row in rows]
+
+    def candles_latest(self, symbol: str, timeframe: str) -> Candle | None:
+        row = self._conn.execute(
+            "SELECT symbol, timeframe, timestamp, open, high, low, close, volume FROM candles WHERE symbol=? AND timeframe=? ORDER BY ts_ms DESC LIMIT 1",
             (symbol, timeframe),
         ).fetchone()
-        return int(row["m"]) if row and row["m"] is not None else None
+        return Candle(**row) if row else None
 
-    def latest_close(self, symbol: str, timeframe: str | None = None) -> float | None:
-        """Latest close price for a symbol, optionally for a specific timeframe."""
-        if timeframe:
-            row = self._db.conn.execute(
-                "SELECT close FROM candles WHERE symbol=? AND timeframe=? ORDER BY ts_ms DESC LIMIT 1",
-                (symbol, timeframe),
-            ).fetchone()
-        else:
-            row = self._db.conn.execute(
-                "SELECT close FROM candles WHERE symbol=? ORDER BY ts_ms DESC LIMIT 1",
-                (symbol,),
-            ).fetchone()
-        return float(row["close"]) if row else None
+    # ---- Signals ----
 
-    def fetch(self, symbol: str, timeframe: str, limit: int = 200) -> list[Candle]:
-        """Synchronous fetch."""
-        limit_val = max(1, min(int(limit), policy.MAX_CANDLES_LOOKBACK))
-        rows = self._db.conn.execute(
-            """SELECT ts_ms, open, high, low, close, volume
-                 FROM candles
-                WHERE symbol=? AND timeframe=?
-                ORDER BY ts_ms DESC LIMIT ?""",
-            (symbol, timeframe, limit_val),
-        ).fetchall()
-        out = [
-            Candle(
-                timestamp=int(r["ts_ms"]), open=float(r["open"]), high=float(r["high"]),
-                low=float(r["low"]), close=float(r["close"]), volume=float(r["volume"]),
-            )
-            for r in rows
-        ]
-        out.reverse()  # ascending for indicators
-        return out
-
-    # Async methods for use in async context (use run_in_executor)
-    async def upsert_many_async(self, symbol: str, timeframe: str, candles: list[Candle]) -> int:
-        """Async wrapper using run_in_executor for sync SQLite operations."""
-        return await asyncio.get_event_loop().run_in_executor(
-            None, lambda: self.upsert_many(symbol, timeframe, candles)
-        )
-
-    async def latest_ts_async(self, symbol: str, timeframe: str) -> int | None:
-        """Async wrapper using run_in_executor for sync SQLite operations."""
-        return await asyncio.get_event_loop().run_in_executor(
-            None, lambda: self.latest_ts(symbol, timeframe)
-        )
-
-    async def fetch_async(self, symbol: str, timeframe: str, limit: int = 200) -> list[Candle]:
-        """Async wrapper using run_in_executor for sync SQLite operations."""
-        return await asyncio.get_event_loop().run_in_executor(
-            None, lambda: self.fetch(symbol, timeframe, limit)
-        )
-
-    async def fetch_since(self, symbol: str, timeframe: str, since_ts: int) -> list[Candle]:
-        """Fetch candles with timestamp greater than since_ts (for incremental updates)."""
-        def _sync_fetch_since() -> list[Candle]:
-            rows = self._db.conn.execute(
-                """SELECT ts_ms, open, high, low, close, volume
-                     FROM candles
-                    WHERE symbol=? AND timeframe=? AND ts_ms > ?
-                    ORDER BY ts_ms ASC""",
-                (symbol, timeframe, since_ts),
-            ).fetchall()
-            out = [
-                Candle(
-                    timestamp=int(r["ts_ms"]), open=float(r["open"]), high=float(r["high"]),
-                    low=float(r["low"]), close=float(r["close"]), volume=float(r["volume"]),
-                )
-                for r in rows
-            ]
-            return out
-        
-        return await asyncio.get_event_loop().run_in_executor(None, _sync_fetch_since)
-
-    async def count(self, symbol: str, timeframe: str) -> int:
-        """Count candles for a symbol/timeframe pair."""
-        def _sync_count() -> int:
-            row = self._db.conn.execute(
-                "SELECT COUNT(*) AS c FROM candles WHERE symbol=? AND timeframe=?",
-                (symbol, timeframe),
-            ).fetchone()
-            return int(row["c"]) if row else 0
-        
-        return await asyncio.get_event_loop().run_in_executor(None, _sync_count)
-
-
-# --------------------------------------------------------------------------- #
-# Signal repository
-# --------------------------------------------------------------------------- #
-class SignalRepository:
-    def __init__(self, db: Database) -> None:
-        self._db = db
-
-    def insert(
+    def signals_fetch(
         self,
         symbol: str,
-        signal: Signal,
-        confidence: float,
-        side: Side | None = None,
-        score: float | None = None,
-        timeframe: str | None = None,
-        reason: str = "",
-        ts_ms: int | None = None,
-    ) -> int:
-        with self._db.transaction() as conn:
-            cur = conn.execute(
-                """INSERT INTO signals
-                   (ts_ms, symbol, signal, side, confidence, score, timeframe, reason)
+        timeframe: str,
+        limit: int = 100,
+        since_ms: int | None = None,
+    ) -> list:
+        sql = "SELECT ts_ms, symbol, signal, side, confidence, score, timeframe, reason FROM signals WHERE symbol=? AND timeframe=?"
+        params: list = [symbol, timeframe]
+        if since_ms is not None:
+            sql += " AND ts_ms >= ?"
+            params.append(since_ms)
+        sql += " ORDER BY ts_ms DESC LIMIT ?"
+        params.append(limit)
+        return self._conn.execute(sql, params).fetchall()
+
+    # ---- Decisions ----
+
+    def decisions_upsert(self, decision) -> int:
+        with self._conn:
+            self._conn.execute(
+                """INSERT OR REPLACE INTO decisions
+                   (ts_ms, symbol, timeframe, accepted, reject_reason, score, signal, outcome, detail)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    decision.ts_ms,
+                    decision.symbol,
+                    decision.timeframe,
+                    int(decision.accepted),
+                    decision.reject_reason,
+                    decision.score,
+                    decision.signal,
+                    decision.outcome,
+                    decision.detail,
+                ),
+            )
+        return 1
+
+    def decisions_fetch(
+        self,
+        symbol: str | None = None,
+        since_ms: int | None = None,
+        limit: int = 100,
+    ) -> list:
+        sql = "SELECT ts_ms, symbol, timeframe, accepted, reject_reason, score, signal, outcome, detail FROM decisions WHERE 1=1"
+        params: list = []
+        if symbol:
+            sql += " AND symbol=?"
+            params.append(symbol)
+        if since_ms is not None:
+            sql += " AND ts_ms >= ?"
+            params.append(since_ms)
+        sql += " ORDER BY ts_ms DESC LIMIT ?"
+        params.append(limit)
+        return self._conn.execute(sql, tuple(params)).fetchall()
+
+    # ---- Positions ----
+
+    def positions_upsert(self, position) -> int:
+        with self._conn:
+            self._conn.execute(
+                """INSERT OR REPLACE INTO positions
+                   (symbol, timeframe, side, size, entry_price, stop, take, status, closed_by, opened_at_ms, closed_at_ms, exit_price, pnl_pct, mode)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    position.symbol,
+                    position.timeframe,
+                    position.side.value,
+                    position.size,
+                    position.entry_price,
+                    position.stop,
+                    position.take,
+                    position.status.value,
+                    position.closed_by,
+                    position.opened_at_ms,
+                    position.closed_at_ms,
+                    position.exit_price,
+                    position.pnl_pct,
+                    position.mode.value,
+                ),
+            )
+        return 1
+
+    def positions_fetch(
+        self,
+        symbol: str | None = None,
+        status: str | None = None,
+        limit: int = 100,
+    ) -> list:
+        sql = "SELECT * FROM positions WHERE 1=1"
+        params: list = []
+        if symbol:
+            sql += " AND symbol=?"
+            params.append(symbol)
+        if status:
+            sql += " AND status=?"
+            params.append(status)
+        sql += " ORDER BY opened_at_ms DESC LIMIT ?"
+        params.append(limit)
+        rows = self._conn.execute(sql, tuple(params)).fetchall()
+        return [Position(**row) for row in rows]
+
+    # ---- Trades ----
+
+    def trades_insert(self, trade) -> int:
+        with self._conn:
+            cur = self._conn.execute(
+                """INSERT INTO trades
+                   (position_id, symbol, side, order_type, size, price, status, ts_ms, mode)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
-                    ts_ms or _now_ms(),
-                    symbol,
-                    signal.value,
-                    side.value if side else None,
-                    float(confidence),
-                    score,
-                    timeframe,
-                    reason,
+                    trade.position_id,
+                    trade.symbol,
+                    trade.side.value,
+                    trade.order_type.value,
+                    trade.size,
+                    trade.price,
+                    trade.status.value,
+                    trade.ts_ms,
+                    trade.mode.value,
                 ),
             )
-            return _lastrowid(cur)
+        return cur.lastrowid
 
-    async def insert_async(self, *args, **kwargs) -> int:
-        return await asyncio.get_event_loop().run_in_executor(
-            None, lambda: self.insert(*args, **kwargs)
-        )
+    # ---- Equity ----
+
+    def equity_upsert(self, ts_ms: int, currency: str, equity: float, drawdown_pct: float) -> int:
+        with self._conn:
+            self._conn.execute(
+                "INSERT OR REPLACE INTO equity (ts_ms, currency, equity, drawdown_pct) VALUES (?, ?, ?, ?)",
+                (ts_ms, currency, equity, drawdown_pct),
+            )
+        return 1
+
+    def equity_latest(self) -> tuple[int, str, float, float] | None:
+        row = self._conn.execute(
+            "SELECT ts_ms, currency, equity, drawdown_pct FROM equity ORDER BY ts_ms DESC LIMIT 1"
+        ).fetchone()
+        return tuple(row) if row else None
+
+    # ---- State (R8) ----
+
+    def state_get(self, key: str) -> str | None:
+        row = self._conn.execute(
+            "SELECT value FROM state WHERE key=?", (key,)
+        ).fetchone()
+        return row[0] if row else None
 
 
-# --------------------------------------------------------------------------- #
-# Decision repository
-# --------------------------------------------------------------------------- #
-class DecisionRepository:
-    def __init__(self, db: Database) -> None:
+class CandleRepository:
+    """Read-only access to candles for backtesting."""
+
+    def __init__(self, db: Database):
         self._db = db
 
-    def insert(self, decision: DecisionRecord, ts_ms: int | None = None) -> int:
-        with self._db.transaction() as conn:
-            cur = conn.execute(
-                """INSERT INTO decisions
-                   (ts_ms, symbol, timeframe, accepted, reject_reason, detail, score, signal, outcome)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (
-                    ts_ms if ts_ms is not None else int(decision.timestamp.timestamp() * 1000),
-                    decision.symbol,
-                    decision.timeframe or "",
-                    1 if decision.accepted else 0,
-                    _reject_value(decision.reason),
-                    decision.detail,
-                    decision.score,
-                    decision.signal.value if decision.signal else None,
-                    decision.outcome,
-                ),
-            )
-            return _lastrowid(cur)
+    _SELECT = (
+        "SELECT symbol, timeframe, ts_ms as timestamp, open, high, low, close, volume "
+        "FROM candles WHERE symbol=? AND timeframe=? AND ts_ms >= ? "
+    )
 
-    def insert_many(self, decisions: list, ts_ms: int | None = None) -> int:
-        """Bulk-insert decisions in a single transaction (backtest hot path)."""
-        if not decisions:
-            return 0
-        rows = [
-            (
-                ts_ms if ts_ms is not None else int(d.timestamp.timestamp() * 1000),
-                d.symbol,
-                d.timeframe or "",
-                1 if d.accepted else 0,
-                _reject_value(d.reason),
-                d.detail,
-                d.score,
-                d.signal.value if d.signal else None,
-                d.outcome,
-            )
-            for d in decisions
-        ]
-        with self._db.transaction() as conn:
-            conn.executemany(
-                """INSERT INTO decisions
-                   (ts_ms, symbol, timeframe, accepted, reject_reason, detail, score, signal, outcome)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                rows,
-            )
-            return len(rows)
-
-    def count_recent_for_symbol(
+    def fetch(
         self,
         symbol: str,
-        within_minutes: int,
-        *,
-        reference_ts_ms: int | None = None,
-    ) -> int:
-        """Number of decisions (any kind) for a symbol within the window.
+        timeframe: str,
+        since_ms: int = 0,
+        limit: int = 400,
+    ) -> list[Candle]:
+        """Последние ``limit`` свечей начиная с ``since_ms``, в порядке возрастания.
 
-        Used by the cooldown filter to detect recent activity.
-        Uses wall-clock by default; accepts ``reference_ts_ms`` for backtest mode.
+        Ограниченное чтение для живого фида: ``limit`` зажимается политикой
+        ``policy.MAX_CANDLES_LOOKBACK``. Бэктесту нужна вся история — он
+        обязан использовать :meth:`fetch_since`, а не увеличивать limit здесь.
 
-        Args:
-            symbol: The trading pair.
-            within_minutes: Lookback window in minutes.
-            reference_ts_ms: Optional reference timestamp (epoch ms) instead of
-                ``_now_ms()``.  Pass the current bar's timestamp when running
-                in backtest so the cooldown is evaluated against historical time,
-                not wall-clock time.
+        Берутся именно ПОСЛЕДНИЕ свечи (ORDER BY DESC + разворот), а не первые:
+        фиду нужен свежий хвост истории, а не её начало.
         """
-        now_ms = reference_ts_ms if reference_ts_ms is not None else _now_ms()
-        cutoff = now_ms - within_minutes * 60 * 1000
-        row = self._db.conn.execute(
-            "SELECT COUNT(*) AS c FROM decisions WHERE symbol=? AND ts_ms >= ?",
-            (symbol, cutoff),
+        limit_val = max(1, min(int(limit), policy.MAX_CANDLES_LOOKBACK))
+        rows = self._db._conn.execute(
+            self._SELECT + "ORDER BY ts_ms DESC LIMIT ?",
+            (symbol, timeframe, since_ms, limit_val),
+        ).fetchall()
+        return [Candle(**row) for row in reversed(rows)]
+
+    def fetch_since(
+        self,
+        symbol: str,
+        timeframe: str,
+        since_ms: int,
+        limit: int | None = None,
+    ) -> list[Candle]:
+        """ВСЕ свечи начиная с ``since_ms``, в порядке возрастания.
+
+        Путь воспроизведения истории для бэктеста, намеренно НЕ ограниченный
+        ``policy.MAX_CANDLES_LOOKBACK``: эта политика защищает частоту обращений
+        к бирже, а не чтение локальной БД.
+
+        Ранее здесь стоял дефолт ``limit=400``, из-за чего вызовы вида
+        ``fetch_since(sym, tf, since_ms=0)`` — а так его зовут и
+        HistoricalCandleSource.load_all_async, и walk_forward — молча получали
+        первые 400 баров вместо всей истории. Бэктест на реальных данных читал
+        ~1.7% запрошенного и почти всегда промахивался мимо нужного окна.
+        """
+        if limit is None:
+            rows = self._db._conn.execute(
+                self._SELECT + "ORDER BY ts_ms ASC",
+                (symbol, timeframe, since_ms),
+            ).fetchall()
+        else:
+            rows = self._db._conn.execute(
+                self._SELECT + "ORDER BY ts_ms ASC LIMIT ?",
+                (symbol, timeframe, since_ms, max(1, int(limit))),
+            ).fetchall()
+        return [Candle(**row) for row in rows]
+
+    def upsert_many(
+        self,
+        symbol: str,
+        timeframe: str,
+        candles: list[Candle],
+    ) -> int:
+        """Insert many candles, ignoring conflicts (ON CONFLICT DO NOTHING)."""
+        if not candles:
+            return 0
+        with self._db._conn:
+            self._db._conn.executemany(
+                """INSERT OR IGNORE INTO candles
+                   (symbol, timeframe, ts_ms, open, high, low, close, volume)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                [(symbol, timeframe, c.timestamp, c.open, c.high, c.low, c.close, c.volume)
+                 for c in candles],
+            )
+        return len(candles)
+
+    def latest_ts(self, symbol: str, timeframe: str) -> int | None:
+        """Get the latest candle timestamp for a symbol/timeframe."""
+        row = self._db._conn.execute(
+            "SELECT MAX(ts_ms) FROM candles WHERE symbol=? AND timeframe=?",
+            (symbol, timeframe),
         ).fetchone()
-        return int(row["c"]) if row else 0
+        return row[0] if row and row[0] is not None else None
 
-    async def insert_async(self, *args, **kwargs) -> int:
-        return await asyncio.get_event_loop().run_in_executor(
-            None, lambda: self.insert(*args, **kwargs)
+    def latest_close(self, symbol: str, timeframe: str) -> float | None:
+        """Get the latest candle close price for a symbol/timeframe."""
+        row = self._db._conn.execute(
+            "SELECT close FROM candles WHERE symbol=? AND timeframe=? ORDER BY ts_ms DESC LIMIT 1",
+            (symbol, timeframe),
+        ).fetchone()
+        return row[0] if row else None
+
+    async def latest_ts_async(self, symbol: str, timeframe: str) -> int | None:
+        """Get the latest candle timestamp for a symbol/timeframe."""
+        row = self._db._conn.execute(
+            "SELECT MAX(ts_ms) FROM candles WHERE symbol=? AND timeframe=?",
+            (symbol, timeframe),
+        ).fetchone()
+        return row[0] if row and row[0] is not None else None
+
+    async def fetch_async(
+        self,
+        symbol: str,
+        timeframe: str,
+        limit: int = 400,
+        since_ms: int = 0,
+    ) -> list[Candle]:
+        """Async-обёртка над :meth:`fetch` через run_in_executor.
+
+        Делегирует, а не дублирует SQL: иначе политика ``MAX_CANDLES_LOOKBACK``
+        и порядок выборки расходятся между синхронным и асинхронным путём.
+        """
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(
+            None, lambda: self.fetch(symbol, timeframe, since_ms, limit)
         )
 
-    async def count_recent_for_symbol_async(self, *args, **kwargs) -> int:
-        return await asyncio.get_event_loop().run_in_executor(
-            None, lambda: self.count_recent_for_symbol(*args, **kwargs)
-        )
+    async def upsert_many_async(
+        self,
+        symbol: str,
+        timeframe: str,
+        candles: list[Candle],
+    ) -> int:
+        """Insert or replace many candles asynchronously."""
+        if not candles:
+            return 0
+        with self._db._conn:
+            self._db._conn.executemany(
+                """INSERT OR REPLACE INTO candles
+                   (symbol, timeframe, ts_ms, open, high, low, close, volume)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                [(symbol, timeframe, c.timestamp, c.open, c.high, c.low, c.close, c.volume)
+                 for c in candles],
+            )
+        return len(candles)
 
 
-# --------------------------------------------------------------------------- #
-# Position repository
-# --------------------------------------------------------------------------- #
 class PositionRepository:
-    def __init__(self, db: Database) -> None:
+    """Repository for position operations."""
+
+    def __init__(self, db: Database):
         self._db = db
 
-    def open_exists(self, symbol: str, timeframe: str | None = None,
-                    side: str | None = None) -> bool:
-        if timeframe and side:
-            row = self._db.conn.execute(
-                "SELECT 1 FROM positions WHERE symbol=? AND timeframe=? AND side=? AND status='open' LIMIT 1",
-                (symbol, timeframe, side),
-            ).fetchone()
-        elif timeframe:
-            row = self._db.conn.execute(
+    def list_open(self, symbol: str | None = None) -> list[Position]:
+        sql = "SELECT * FROM positions WHERE status='open'"
+        params = []
+        if symbol:
+            sql += " AND symbol=?"
+            params.append(symbol)
+        sql += " ORDER BY opened_at_ms DESC"
+        rows = self._db._conn.execute(sql, tuple(params)).fetchall()
+        return [Position(**row) for row in rows]
+
+    def list_closed(self, symbol: str | None = None, limit: int = 1000) -> list[Position]:
+        sql = "SELECT * FROM positions WHERE status='closed'"
+        params = []
+        if symbol:
+            sql += " AND symbol=?"
+            params.append(symbol)
+        sql += " ORDER BY closed_at_ms DESC LIMIT ?"
+        params.append(limit)
+        rows = self._db._conn.execute(sql, tuple(params)).fetchall()
+        return [Position(**row) for row in rows]
+
+    def open_exists(self, symbol: str, timeframe: str | None = None) -> bool:
+        if timeframe:
+            row = self._db._conn.execute(
                 "SELECT 1 FROM positions WHERE symbol=? AND timeframe=? AND status='open' LIMIT 1",
                 (symbol, timeframe),
             ).fetchone()
         else:
-            row = self._db.conn.execute(
+            row = self._db._conn.execute(
                 "SELECT 1 FROM positions WHERE symbol=? AND status='open' LIMIT 1",
                 (symbol,),
             ).fetchone()
         return row is not None
-
-    def _list_open_sql(self, symbol: str | None = None, timeframe: str | None = None) -> tuple[str, list]:
-        clauses = ["status='open'"]
-        params: list = []
-        if symbol:
-            clauses.append("symbol=?")
-            params.append(symbol)
-        if timeframe:
-            clauses.append("timeframe=?")
-            params.append(timeframe)
-        sql = (
-            "SELECT id, symbol, timeframe, side, size, entry_price, stop, take,"
-            " opened_at_ms, status, closed_at_ms, exit_price, pnl_pct, closed_by"
-            f" FROM positions WHERE {' AND '.join(clauses)} ORDER BY opened_at_ms"
-        )
-        return sql, params
-
-    def list_open(self, symbol: str | None = None, timeframe: str | None = None) -> list[Position]:
-        sql, params = self._list_open_sql(symbol, timeframe)
-        rows = self._db.conn.execute(sql, params).fetchall()
-        return [self._row_to_position(r) for r in rows]
-
-    def _list_closed_sql(self, symbol: str | None = None, limit: int = 100) -> tuple[str, list]:
-        clauses: list[str] = []
-        params: list = []
-        if symbol:
-            clauses.append("symbol=?")
-            params.append(symbol)
-        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
-        sql = (
-            "SELECT id, symbol, timeframe, side, size, entry_price, stop, take,"
-            " opened_at_ms, status, closed_at_ms, exit_price, pnl_pct, closed_by"
-            f" FROM positions {where} ORDER BY closed_at_ms DESC LIMIT ?"
-        )
-        params.append(limit)
-        return sql, params
-
-    def list_closed(self, symbol: str | None = None, limit: int = 100) -> list[Position]:
-        sql, params = self._list_closed_sql(symbol, limit)
-        rows = self._db.conn.execute(sql, params).fetchall()
-        return [self._row_to_position(r) for r in rows]
 
     def insert(
         self,
@@ -668,170 +734,140 @@ class PositionRepository:
         opened_at_ms: int | None = None,
         status: TradeStatus = TradeStatus.OPEN,
     ) -> int:
-        with self._db.transaction() as conn:
-            cur = conn.execute(
+        import time
+        if opened_at_ms is None:
+            opened_at_ms = int(time.time() * 1000)
+        with self._db._conn:
+            cur = self._db._conn.execute(
                 """INSERT INTO positions
-                   (symbol, timeframe, side, size, entry_price, stop, take, status,
-                    opened_at_ms, mode)
+                   (symbol, timeframe, side, size, entry_price, stop, take, status, opened_at_ms, mode)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
-                    symbol, timeframe, side.value, float(size), float(entry_price),
-                    float(stop), float(take), status.value,
-                    opened_at_ms or _now_ms(), mode.value,
+                    symbol,
+                    timeframe,
+                    side.value,
+                    size,
+                    entry_price,
+                    stop,
+                    take,
+                    status.value,
+                    opened_at_ms,
+                    mode.value,
                 ),
             )
-            return _lastrowid(cur)
+        return cur.lastrowid
 
     def close(
         self,
         position_id: int,
-        exit_price: float,
-        pnl_pct: float,
-        closed_at_ms: int | None = None,
+        *,
+        reason: str = "manual",
         closed_by: str | None = None,
-    ) -> None:
-        with self._db.transaction() as conn:
-            conn.execute(
-                """UPDATE positions
-                      SET status='closed', exit_price=?, pnl_pct=?,
-                          closed_at_ms=?, closed_by=?, updated_at=?
-                    WHERE id=?""",
-                (
-                    float(exit_price), float(pnl_pct),
-                    closed_at_ms or _now_ms(), closed_by, _utc_iso(), position_id,
-                ),
+        exit_price: float | None = None,
+        pnl_pct: float | None = None,
+        closed_at_ms: int | None = None,
+    ) -> bool:
+        import time
+        # Support both `reason` and `closed_by` for backward compatibility
+        close_reason = closed_by or reason
+        with self._db._conn:
+            row = self._db._conn.execute(
+                "SELECT id FROM positions WHERE id=? AND status='open'",
+                (position_id,),
+            ).fetchone()
+            if not row:
+                return False
+            pid = row[0]
+            closed_at_ms = closed_at_ms or int(time.time() * 1000)
+            self._db._conn.execute(
+                "UPDATE positions SET status='closed', closed_by=?, exit_price=?, pnl_pct=?, closed_at_ms=? WHERE id=?",
+                (close_reason, exit_price, pnl_pct, closed_at_ms, pid),
             )
+        return True
 
-    def close_all_open(
+    def close_by_symbol(
         self,
-        exit_price: float,
-        closed_by: str = "manual",
-    ) -> int:
-        """Close every open position at the given price. Returns count closed."""
-        now_ms = _now_ms()
-        with self._db.transaction() as conn:
-            open_rows = conn.execute(
-                """SELECT id, symbol, side, entry_price, size
-                     FROM positions WHERE status='open'"""
-            ).fetchall()
-            count = 0
-            for row in open_rows:
-                pid = int(row["id"])
-                entry = float(row["entry_price"])
-                size = float(row["size"])
-                side = Side(row["side"])
-                # Record exit trade
-                conn.execute(
-                    """INSERT INTO trades
-                       (position_id, symbol, side, order_type, size, price, status, ts_ms, mode)
-                       VALUES (?, ?, ?, 'market', ?, ?, 'filled', ?, 'paper')""",
-                    (pid, row["symbol"], row["side"], size, float(exit_price), now_ms),
-                )
-                # Calculate break-even P&L (at exit_price equals entry → 0%)
-                # If exit_price differs, calculate actual P&L
-                if side == Side.LONG:
-                    pnl_abs = (exit_price - entry) * size
-                else:
-                    pnl_abs = (entry - exit_price) * size
-                pnl_pct = (pnl_abs / (entry * size)) * 100.0 if (entry * size) > 0 else 0.0
-                conn.execute(
-                    """UPDATE positions
-                          SET status='closed', exit_price=?, pnl_pct=?,
-                              closed_at_ms=?, closed_by=?, updated_at=?
-                        WHERE id=?""",
-                    (float(exit_price), round(pnl_pct, 4), now_ms, closed_by, _utc_iso(), pid),
-                )
-                count += 1
-            return count
-
-    def delete_for_symbol(self, symbol: str) -> int:
-        """Delete all position records for a given symbol. Returns count deleted."""
-        with self._db.transaction() as conn:
-            conn.execute(
-                "DELETE FROM trades WHERE position_id IN (SELECT id FROM positions WHERE symbol=?)",
-                (symbol,),
+        symbol: str,
+        timeframe: str,
+        *,
+        reason: str,
+        exit_price: float | None = None,
+        pnl_pct: float | None = None,
+        closed_at_ms: int | None = None,
+    ) -> bool:
+        import time
+        with self._db._conn:
+            row = self._db._conn.execute(
+                "SELECT id, size, entry_price, side FROM positions WHERE symbol=? AND timeframe=? AND status='open'",
+                (symbol, timeframe),
+            ).fetchone()
+            if not row:
+                return False
+            pid, size, entry_price, side = row
+            exit_price = exit_price or 0.0
+            pnl_pct = pnl_pct or 0.0
+            closed_at_ms = closed_at_ms or int(time.time() * 1000)
+            self._db._conn.execute(
+                "UPDATE positions SET status='closed', closed_by=?, exit_price=?, pnl_pct=?, closed_at_ms=? WHERE id=?",
+                (reason, exit_price, pnl_pct, closed_at_ms, pid),
             )
-            cur = conn.execute(
-                "DELETE FROM positions WHERE symbol=?",
-                (symbol,),
-            )
-            return cur.rowcount
+        return True
 
     def delete_all(self) -> int:
-        """Delete all position records. Returns count deleted."""
-        with self._db.transaction() as conn:
-            conn.execute("DELETE FROM trades")
-            cur = conn.execute("DELETE FROM positions")
-            return cur.rowcount
+        with self._db._conn:
+            cur = self._db._conn.execute("DELETE FROM positions")
+        return cur.rowcount
 
-    async def open_exists_async(self, *args, **kwargs) -> bool:
-        return await asyncio.get_event_loop().run_in_executor(
-            None, lambda: self.open_exists(*args, **kwargs)
-        )
+    def close_all_open(self, exit_price: float, closed_by: str) -> int:
+        import time
+        closed_at_ms = int(time.time() * 1000)
+        with self._db._conn:
+            cur = self._db._conn.execute(
+                "UPDATE positions SET status='closed', closed_by=?, exit_price=?, closed_at_ms=? WHERE status='open'",
+                (closed_by, exit_price, closed_at_ms),
+            )
+        return cur.rowcount
 
-    async def list_open_async(self, *args, **kwargs) -> list[Position]:
-        return await asyncio.get_event_loop().run_in_executor(
-            None, lambda: self.list_open(*args, **kwargs)
-        )
-
-    async def list_closed_async(self, *args, **kwargs) -> list[Position]:
-        return await asyncio.get_event_loop().run_in_executor(
-            None, lambda: self.list_closed(*args, **kwargs)
-        )
-
-    async def insert_async(self, *args, **kwargs) -> int:
-        return await asyncio.get_event_loop().run_in_executor(
-            None, lambda: self.insert(*args, **kwargs)
-        )
-
-    async def close_async(self, *args, **kwargs) -> None:
-        return await asyncio.get_event_loop().run_in_executor(
-            None, lambda: self.close(*args, **kwargs)
-        )
-
-    async def close_all_open_async(self, *args, **kwargs) -> int:
-        return await asyncio.get_event_loop().run_in_executor(
-            None, lambda: self.close_all_open(*args, **kwargs)
-        )
-
-    async def delete_for_symbol_async(self, *args, **kwargs) -> int:
-        return await asyncio.get_event_loop().run_in_executor(
-            None, lambda: self.delete_for_symbol(*args, **kwargs)
-        )
-
-    async def delete_all_async(self) -> int:
-        return await asyncio.get_event_loop().run_in_executor(None, self.delete_all)
-
-    def _row_to_position(self, r: sqlite3.Row) -> Position:
-        opened = datetime.fromtimestamp(r["opened_at_ms"] / 1000.0, tz=UTC)
-        closed = (
-            datetime.fromtimestamp(r["closed_at_ms"] / 1000.0, tz=UTC)
-            if r["closed_at_ms"]
-            else None
-        )
-        return Position(
-            id=int(r["id"]),
-            symbol=r["symbol"],
-            timeframe=r["timeframe"],
-            side=Side(r["side"]),
-            size=float(r["size"]),
-            entry_price=float(r["entry_price"]),
-            stop=float(r["stop"]),
-            take=float(r["take"]),
-            opened_at=opened,
-            closed_by=r["closed_by"],
-            status=TradeStatus(r["status"]),
-            closed_at=closed,
-            exit_price=float(r["exit_price"]) if r["exit_price"] is not None else None,
-            pnl_pct=float(r["pnl_pct"]) if r["pnl_pct"] is not None else None,
-        )
+    def delete_for_symbol(self, symbol: str) -> int:
+        with self._db._conn:
+            cur = self._db._conn.execute("DELETE FROM positions WHERE symbol=?", (symbol,))
+        return cur.rowcount
 
 
-# --------------------------------------------------------------------------- #
-# Trade repository
-# --------------------------------------------------------------------------- #
+class SignalRepository:
+    """Repository for signal operations."""
+
+    def __init__(self, db: Database):
+        self._db = db
+
+    def insert(
+        self,
+        symbol: str,
+        signal: str,
+        confidence: float,
+        side: str | None,
+        score: float | None,
+        timeframe: str,
+        reason: str,
+        ts_ms: int | None = None,
+    ) -> int:
+        import time
+        if ts_ms is None:
+            ts_ms = int(time.time() * 1000)
+        with self._db._conn:
+            self._db._conn.execute(
+                """INSERT OR REPLACE INTO signals
+                   (ts_ms, symbol, signal, side, confidence, score, timeframe, reason)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (ts_ms, symbol, signal, side, confidence, score or 0.0, timeframe, reason),
+            )
+        return 1
+
+
 class TradeRepository:
-    def __init__(self, db: Database) -> None:
+    """Repository for trade operations."""
+
+    def __init__(self, db: Database):
         self._db = db
 
     def insert(
@@ -844,143 +880,149 @@ class TradeRepository:
         price: float,
         mode: Mode,
         status: OrderStatus = OrderStatus.FILLED,
-        ts_ms: int | None = None,
         external_id: str | None = None,
     ) -> int:
-        with self._db.transaction() as conn:
-            cur = conn.execute(
+        import time
+        ts_ms = int(time.time() * 1000)
+        with self._db._conn:
+            cur = self._db._conn.execute(
                 """INSERT INTO trades
-                   (position_id, symbol, side, order_type, size, price, status,
-                    ts_ms, mode, external_id)
+                   (position_id, symbol, side, order_type, size, price, status, ts_ms, mode, external_id)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
-                    int(position_id),
+                    position_id,
                     symbol,
                     side.value,
                     order_type.value,
-                    float(size),
-                    float(price),
+                    size,
+                    price,
                     status.value,
-                    ts_ms or _now_ms(),
+                    ts_ms,
                     mode.value,
                     external_id,
                 ),
             )
-            return _lastrowid(cur)
+        return cur.lastrowid
 
-    def list_for_position(self, position_id: int) -> list[Trade]:
-        rows = self._db.conn.execute(
-            """SELECT id, position_id, symbol, side, order_type, size, price,
-                      status, ts_ms, mode, external_id
-                 FROM trades
-                WHERE position_id=?
-                ORDER BY ts_ms, id""",
-            (int(position_id),),
+    def list_for_position(self, position_id: int) -> list:
+        rows = self._db._conn.execute(
+            "SELECT * FROM trades WHERE position_id=? ORDER BY ts_ms",
+            (position_id,),
         ).fetchall()
-        return [self._row_to_trade(r) for r in rows]
+        return [Trade(**row) for row in rows]
 
-    def latest_for_symbol(self, symbol: str, limit: int = 20) -> list[Trade]:
-        limit = max(1, min(int(limit), 1000))
-        rows = self._db.conn.execute(
-            """SELECT id, position_id, symbol, side, order_type, size, price,
-                      status, ts_ms, mode, external_id
-                 FROM trades
-                WHERE symbol=?
-                ORDER BY ts_ms DESC, id DESC
-                LIMIT ?""",
+    def latest_for_symbol(self, symbol: str, limit: int = 1) -> list:
+        rows = self._db._conn.execute(
+            "SELECT * FROM trades WHERE symbol=? ORDER BY ts_ms DESC LIMIT ?",
             (symbol, limit),
         ).fetchall()
-        return [self._row_to_trade(r) for r in rows]
-
-    async def insert_async(self, *args, **kwargs) -> int:
-        return await asyncio.get_event_loop().run_in_executor(
-            None, lambda: self.insert(*args, **kwargs)
-        )
-
-    async def list_for_position_async(self, *args, **kwargs) -> list[Trade]:
-        return await asyncio.get_event_loop().run_in_executor(
-            None, lambda: self.list_for_position(*args, **kwargs)
-        )
-
-    async def latest_for_symbol_async(self, *args, **kwargs) -> list[Trade]:
-        return await asyncio.get_event_loop().run_in_executor(
-            None, lambda: self.latest_for_symbol(*args, **kwargs)
-        )
-
-    @staticmethod
-    def _row_to_trade(r: sqlite3.Row) -> Trade:
-        return Trade(
-            id=int(r["id"]),
-            position_id=int(r["position_id"]),
-            symbol=r["symbol"],
-            side=Side(r["side"]),
-            order_type=OrderType(r["order_type"]),
-            size=float(r["size"]),
-            price=float(r["price"]),
-            status=OrderStatus(r["status"]),
-            ts_ms=int(r["ts_ms"]),
-            mode=Mode(r["mode"]),
-            external_id=r["external_id"],
-        )
+        return [Trade(**row) for row in rows]
 
 
-# --------------------------------------------------------------------------- #
-# Equity repository
-# --------------------------------------------------------------------------- #
 class EquityRepository:
-    def __init__(self, db: Database) -> None:
+    """Repository for equity operations."""
+
+    def __init__(self, db: Database):
         self._db = db
 
     def insert(
         self,
         currency: str,
         equity: float,
-        drawdown_pct: float | None,
+        drawdown_pct: float,
         mode: Mode,
         ts_ms: int | None = None,
     ) -> int:
-        with self._db.transaction() as conn:
-            cur = conn.execute(
-                """INSERT INTO equity (ts_ms, currency, equity, drawdown_pct, mode)
-                   VALUES (?, ?, ?, ?, ?)""",
-                (ts_ms or _now_ms(), currency, float(equity), drawdown_pct, mode.value),
+        import time
+        if ts_ms is None:
+            ts_ms = int(time.time() * 1000)
+        with self._db._conn:
+            self._db._conn.execute(
+                "INSERT OR REPLACE INTO equity (ts_ms, currency, equity, drawdown_pct, mode) VALUES (?, ?, ?, ?, ?)",
+                (ts_ms, currency, equity, drawdown_pct, mode.value),
             )
-            return _lastrowid(cur)
+        return 1
 
     def latest(self, mode: Mode) -> tuple[float, float] | None:
-        """Return (equity, drawdown_pct) of the most recent record for a mode."""
-        row = self._db.conn.execute(
+        """Get latest equity for mode. Returns (equity, drawdown_pct) or None."""
+        row = self._db._conn.execute(
             "SELECT equity, drawdown_pct FROM equity WHERE mode=? ORDER BY ts_ms DESC LIMIT 1",
             (mode.value,),
         ).fetchone()
-        if not row:
-            return None
-        return float(row["equity"]), (
-            float(row["drawdown_pct"]) if row["drawdown_pct"] is not None else 0.0
-        )
-
-    async def insert_async(self, *args, **kwargs) -> int:
-        return await asyncio.get_event_loop().run_in_executor(
-            None, lambda: self.insert(*args, **kwargs)
-        )
-
-    async def latest_async(self, mode: Mode) -> tuple[float, float] | None:
-        return await asyncio.get_event_loop().run_in_executor(
-            None, lambda: self.latest(mode)
-        )
+        return (row[0], row[1]) if row else None
 
 
-# --------------------------------------------------------------------------- #
-# Repository registry — one entry point to all repositories
-# --------------------------------------------------------------------------- #
+class DecisionRepository:
+    """Repository for decision operations."""
+
+    def __init__(self, db: Database):
+        self._db = db
+
+    def insert(self, decision) -> int:
+        with self._db._conn:
+            self._db._conn.execute(
+                """INSERT OR REPLACE INTO decisions
+                   (ts_ms, symbol, timeframe, accepted, reject_reason, score, signal, outcome, detail)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    int(decision.timestamp.timestamp() * 1000) if hasattr(decision, 'timestamp') else decision.ts_ms,
+                    decision.symbol,
+                    decision.timeframe,
+                    int(decision.accepted),
+                    decision.reason.value if hasattr(decision.reason, 'value') else decision.reason,
+                    decision.score,
+                    decision.signal.value if hasattr(decision.signal, 'value') else decision.signal,
+                    decision.outcome,
+                    decision.detail,
+                ),
+            )
+        return 1
+
+    def insert_many(self, decisions) -> int:
+        with self._db._conn:
+            self._db._conn.executemany(
+                """INSERT OR REPLACE INTO decisions
+                   (ts_ms, symbol, timeframe, accepted, reject_reason, score, signal, outcome, detail)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                [
+                    (
+                        int(d.timestamp.timestamp() * 1000) if hasattr(d, 'timestamp') else d.ts_ms,
+                        d.symbol,
+                        d.timeframe,
+                        int(d.accepted),
+                        d.reason.value if hasattr(d.reason, 'value') else d.reason,
+                        d.score,
+                        d.signal.value if hasattr(d.signal, 'value') else d.signal,
+                        d.outcome,
+                        d.detail,
+                    )
+                    for d in decisions
+                ],
+            )
+        return len(decisions)
+
+    def count_recent_for_symbol(self, symbol: str, within_minutes: int) -> int:
+        import time
+        since_ms = int(time.time() * 1000) - within_minutes * 60 * 1000
+        row = self._db._conn.execute(
+            "SELECT COUNT(*) FROM decisions WHERE symbol=? AND ts_ms >= ?",
+            (symbol, since_ms),
+        ).fetchone()
+        return row[0] if row else 0
+
+
 class Repositories:
-    """Convenience aggregate of all repositories over one Database."""
+    """Aggregate repositories for dependency injection."""
 
-    def __init__(self, db: Database) -> None:
-        self.db = db
+    def __init__(self, db: Database):
+        self._db = db
         self.candles = CandleRepository(db)
-        self.signals = SignalRepository(db)
-        self.decisions = DecisionRepository(db)
         self.positions = PositionRepository(db)
+        self.signals = SignalRepository(db)
         self.trades = TradeRepository(db)
         self.equity = EquityRepository(db)
+        self.decisions = DecisionRepository(db)
+
+    @property
+    def db(self):
+        return self._db

@@ -322,6 +322,11 @@ def build_portfolio_strategy(settings: Settings) -> PortfolioStrategy:
             exit_threshold=mr.exit_threshold,
             max_holding_bars=mr.max_holding_bars,
             weighting=mr.weighting,
+            rebalance_hours=mr.rebalance_hours,
+            max_positions=mr.max_positions,
+            entry_execution=mr.entry_execution,
+            exit_execution=mr.exit_execution,
+            min_expected_edge_bps=mr.min_expected_edge_bps,
             top_fraction=1.0 - 0.90,  # Use fixed percentile or could be configurable
             short_fraction=0.2,
         )

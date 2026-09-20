@@ -31,6 +31,10 @@ from .test_baseline_comparison import (
     _trending_universe,
 )
 
+# Полный бэктест-прогон: минуты, не секунды. Исключается только из быстрого
+# цикла разработки (-m "not slow"), но НЕ из регрессионного прогона.
+pytestmark = pytest.mark.slow
+
 UNIVERSE = _trending_universe()
 SYMBOLS = list(UNIVERSE)
 

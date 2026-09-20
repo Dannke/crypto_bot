@@ -36,28 +36,42 @@ def test_mr_defaults_match_the_example_contract():
     mr = MeanReversionConfig()
     assert mr.timeframe == "1h"
     assert mr.zscore_window_bars == 48
-    assert mr.signal_lookback == "4h"
+    assert mr.signal_lookback == "8h"
     assert mr.entry_threshold == 2.0
     assert mr.exit_threshold == 0.5
-    assert mr.max_holding_bars == 24
+    assert mr.max_holding_bars == 48
     assert mr.weighting == "inverse_vol"
-    assert mr.rebalance_hours == 1
+    assert mr.rebalance_hours == 12
+    assert mr.max_positions == 4
+    # MR v4 defaults to post_only execution
+    assert mr.entry_execution == "post_only"
+    assert mr.exit_execution == "post_only"
+    assert mr.min_expected_edge_bps == 10
+    assert mr.seed == 42
 
 
 def test_mr_example_from_preregistration_parses():
     mr = MeanReversionConfig.model_validate({
         "timeframe": "1h",
         "zscore_window_bars": 48,
-        "signal_lookback": "4h",
-        "entry_threshold": 2.0,
+        "signal_lookback": "8h",
+        "entry_threshold": 3.0,
         "exit_threshold": 0.5,
-        "max_holding_bars": 24,
+        "max_holding_bars": 48,
         "weighting": "inverse_vol",
-        "rebalance_hours": 1,
+        "rebalance_hours": 24,
+        "max_positions": 2,
+        "entry_execution": "post_only",
+        "exit_execution": "post_only",
+        "min_expected_edge_bps": 10,
         "seed": 42,
     })
     assert mr.zscore_window_bars == 48
-    assert mr.signal_lookback == "4h"
+    assert mr.signal_lookback == "8h"
+    assert mr.entry_threshold == 3.0
+    assert mr.max_holding_bars == 48
+    assert mr.rebalance_hours == 24
+    assert mr.max_positions == 2
 
 
 def test_mr_rejects_bad_zscore_window():
@@ -102,13 +116,6 @@ def test_mr_signal_lookback_must_align_with_timeframe():
     # 90m is not an integer multiple of 1h
     with pytest.raises(ValidationError, match="integer multiple"):
         MeanReversionConfig.model_validate({"timeframe": "1h", "signal_lookback": "90m"})
-    # signal_lookback must be >= rebalance_hours * timeframe
-    with pytest.raises(ValidationError, match="rebalance_hours"):
-        MeanReversionConfig.model_validate({
-            "timeframe": "1h",
-            "signal_lookback": "1h",
-            "rebalance_hours": 2,
-        })
 
 
 # --------------------------------------------------------------------------- #

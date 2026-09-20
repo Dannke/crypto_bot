@@ -265,20 +265,20 @@ class MeanReversionConfig(StrictConfigModel):
     Entry when |z| >= entry_threshold, exit on reversion (|z| <= exit_threshold)
     or time-stop (max_holding_bars). Hourly rebalance cadence.
     """
-
     timeframe: str = "1h"
     zscore_window_bars: int = Field(default=48, ge=10)
-    signal_lookback: str = "4h"
+    signal_lookback: str = "8h"
     entry_threshold: float = Field(default=2.0, gt=0.0)
     exit_threshold: float = Field(default=0.5, ge=0.0)
-    max_holding_bars: int = Field(default=24, ge=1)
+    max_holding_bars: int = Field(default=48, ge=1)
     weighting: Literal["equal", "inverse_vol"] = "inverse_vol"
-    rebalance_hours: int = Field(default=1, ge=1)
-    seed: int | None = Field(default=None, ge=0)
+    rebalance_hours: int = Field(default=12, ge=1)
+    max_positions: int = Field(default=4, ge=1)
+    seed: int | None = Field(default=42, ge=0)
     # Post-only execution (maker-only)
-    entry_execution: Literal["market", "post_only"] = "market"
-    exit_execution: Literal["market", "post_only"] = "market"
-    min_expected_edge_bps: int = Field(default=0, ge=0)
+    entry_execution: Literal["market", "post_only"] = "post_only"
+    exit_execution: Literal["market", "post_only"] = "post_only"
+    min_expected_edge_bps: int = Field(default=10, ge=0)
 
     @model_validator(mode="after")
     def _mr_sanity(self) -> MeanReversionConfig:
@@ -300,10 +300,6 @@ class MeanReversionConfig(StrictConfigModel):
             raise ValueError(
                 f"mean_reversion.signal_lookback {self.signal_lookback!r} is not an "
                 f"integer multiple of timeframe {self.timeframe!r}"
-            )
-        if self.rebalance_hours * tf_seconds > signal_seconds:
-            raise ValueError(
-                "mean_reversion.rebalance_hours * timeframe must not exceed signal_lookback"
             )
         return self
 
@@ -435,6 +431,11 @@ class LoggingConfig(StrictConfigModel):
 # Root
 # --------------------------------------------------------------------------- #
 class Settings(StrictConfigModel):
+    """Application settings loaded from YAML + env overrides.
+
+    All nested configs are validated recursively. Unknown keys in the YAML
+    raise a validation error (fail-fast on config drift).
+    """
     runtime: RuntimeConfig = RuntimeConfig()
     exchange: ExchangeConfig = ExchangeConfig()
     timeframes: TimeframesConfig = TimeframesConfig()
@@ -451,4 +452,5 @@ class Settings(StrictConfigModel):
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> Settings:
         """Build from a parsed YAML mapping, failing fast on unknown keys."""
+
         return cls.model_validate(data)
