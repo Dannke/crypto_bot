@@ -159,9 +159,12 @@ class TestFieldsThatAreNotWired:
     @pytest.mark.xfail(
         strict=True,
         reason=(
-            "пик одновременно открытых одинаков при max_positions=1 и 5; "
-            "состав ограничивает risk.max_open_positions в исполнителе, а не "
-            "mean_reversion.max_positions, который в evaluate_market не читается"
+            "варьируется ТОЛЬКО mean_reversion.max_positions; "
+            "risk.max_open_positions (5) и risk.max_positions (5) зафиксированы. "
+            "Пик одновременно открытых одинаков при 1 и 5, то есть поле стратегии "
+            "декоративно — в evaluate_market оно не читается. Риск-лимит этим НЕ "
+            "затронут: он живёт в risk.* и покрыт отдельно "
+            "(test_portfolio_constraints.py::test_max_open_positions_caps_the_canonical_book)"
         ),
     )
     def test_max_positions_limits_concurrent_book(self, tmp_path) -> None:

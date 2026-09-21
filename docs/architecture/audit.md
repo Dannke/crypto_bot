@@ -248,6 +248,35 @@ portfolio:
 3. **Full walk-forward test** — fix `walk_forward.py` imports for complete train/test automation
 4. **Paper trading integration** — connect orchestrator to Bybit testnet
 
+   **БЛОКЕР (обнаружено 2026-09-21): на portfolio-пути нет работающего закрытия
+   позиций.** Это не деталь MR-трека — относится к любой portfolio-стратегии,
+   включая CSM, и остаётся в силе независимо от вердикта по mean reversion.
+
+   В `orchestrator_portfolio.py` закрытие ровно одно — `_sim_check_positions`
+   на строке 162, и оно вызывает `executor.check_positions(...)`, которого у
+   `PortfolioExecutor` нет:
+
+   ```
+   PortfolioExecutor.check_positions       : False
+   PortfolioExecutor.check_positions_range : True
+   SignalExecutor.check_positions          : True
+   ```
+
+   Других путей нет: ни `close_position_for_symbol`, ни обработки
+   `PortfolioIntent.closes`, ни `close_all_positions`. `AttributeError`
+   ловится в `price_simulator.py:169` и логируется на уровне ERROR каждую
+   секунду, пока есть открытые позиции.
+
+   **Область:** только portfolio-режим. Candidate-режим (single-timeframe)
+   закрывает штатно через `SignalExecutor.check_positions`, поэтому
+   `crypto-bot run` на одном таймфрейме этим не затронут.
+
+   Смежно: post-only заявки в живом оркестраторе не обрабатывает никто —
+   `process_post_only_entries`/`exits` вызываются только из бэктестера, — а
+   `entry_execution`/`exit_execution` по умолчанию `post_only`. То есть до
+   исправления в paper/live позиции по MR не откроются вовсе, что и
+   маскирует отсутствие закрытия.
+
 ---
 
 ## 9. Key Files Reference
