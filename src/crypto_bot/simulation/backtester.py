@@ -536,6 +536,7 @@ class Backtester:
             mode=Mode.PAPER,
             equity=equity,
             cash=equity,
+            positions=self._executor.open_positions,
         )
 
         if self._market_strategy:

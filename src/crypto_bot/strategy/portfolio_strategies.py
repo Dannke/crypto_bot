@@ -709,6 +709,19 @@ class MeanReversionStrategy(PortfolioStrategy):
         long_candidates = [s for s in long_candidates if s not in exited_symbols]
         short_candidates = [s for s in short_candidates if s not in exited_symbols]
 
+        # Инкумбент побеждает: символ, уже удерживаемый на одной стороне,
+        # исключается из кандидатов противоположной.
+        # Коллизия возникает штатно, а не в краевом случае: вошли в LONG при
+        # z=-3.2, цена перелетела зону выхода [-0.5, +0.5] целиком и оказалась
+        # на z=+3.5 -> реверсия не сработала (|z| > exit_threshold), символ
+        # остаётся в keep_long и одновременно проходит в short_candidates.
+        # Без этого фильтра он попадает в selected дважды, PortfolioIntent
+        # падает на проверке уникальности, и весь тик проглатывается широким
+        # except в бэктестере — вместе с легитимными закрытиями.
+        held = set(keep_long) | set(keep_short)
+        long_candidates = [s for s in long_candidates if s not in held]
+        short_candidates = [s for s in short_candidates if s not in held]
+
         # Combine: keep existing non-exited + new entries (avoid duplicates)
         final_long = list(dict.fromkeys(keep_long + long_candidates))
         final_short = list(dict.fromkeys(keep_short + short_candidates))

@@ -68,6 +68,20 @@ def _universe() -> dict[str, list[Candle]]:
     }
 
 
+# Backtester НЕ читает settings.regime — конфиг режима доезжает до пайплайна
+# только через явный аргумент regime_config=. Без него подставляются хардкод-
+# дефолты (trend_period=14, vol_lookback_bars=168 -> нужно 182 бара), и на
+# синтетике в 300 баров пайплайн падает на каждом ребалансе.
+TEST_REGIME = RegimeConfig(
+    enabled=True,
+    reference="universe_basket",
+    trend_period=5,
+    trend_threshold=0.1,
+    vol_lookback_bars=10,
+    vol_percentile_high=0.75,
+)
+
+
 def _mr_config(entry_execution: str, exit_execution: str) -> Config:
     """golden config switched to mean_reversion_v0 with the given execution mode."""
     config = golden_config()
@@ -77,16 +91,7 @@ def _mr_config(entry_execution: str, exit_execution: str) -> Config:
     portfolio = config.settings.portfolio.model_copy(
         update={"strategy_name": "mean_reversion_v0", "mean_reversion": mean_reversion}
     )
-    # Короткие окна режима: синтетических баров меньше, чем требует прод-конфиг.
-    regime = RegimeConfig(
-        enabled=True,
-        reference="universe_basket",
-        trend_period=5,
-        trend_threshold=0.1,
-        vol_lookback_bars=10,
-        vol_percentile_high=0.75,
-    )
-    settings = config.settings.model_copy(update={"portfolio": portfolio, "regime": regime})
+    settings = config.settings.model_copy(update={"portfolio": portfolio, "regime": TEST_REGIME})
     return Config(settings=settings, env=config.env)
 
 
@@ -105,6 +110,7 @@ def _run(tmp_path, config: Config, name: str):
         source=source,
         db=db,
         strategy_mode=StrategyType.PORTFOLIO,
+        regime_config=TEST_REGIME,
     )
     summary = backtester.run()
     conn = sqlite3.connect(db.db_path)
@@ -115,14 +121,16 @@ def _run(tmp_path, config: Config, name: str):
 class TestPostOnlyReachesTheBacktest:
     def test_post_only_mean_reversion_opens_positions(self, tmp_path) -> None:
         """The regression guard: post-only must not silently produce zero trades."""
-        summary, conn = _run(tmp_path, _mr_config("post_only", "post_only"), "post_only")
+        _, conn = _run(tmp_path, _mr_config("post_only", "post_only"), "post_only")
 
-        assert summary.total_trades > 0, (
-            "mean_reversion_v0 with entry_execution=post_only produced no trades — "
+        # Считаем ОТКРЫТЫЕ позиции, а не закрытые сделки: guard про то, что
+        # pending-заявки доезжают до позиции. Закрытие — отдельный механизм, и
+        # его отсутствие не должно выглядеть как несработавший wiring.
+        opened = conn.execute("SELECT COUNT(*) AS c FROM positions").fetchone()
+        assert int(opened["c"]) > 0, (
+            "mean_reversion_v0 with entry_execution=post_only opened no positions — "
             "pending limit orders are never being processed by the bar loop"
         )
-        opened = conn.execute("SELECT COUNT(*) AS c FROM positions").fetchone()
-        assert int(opened["c"]) > 0
 
     def test_post_only_entries_are_recorded_as_limit_orders(self, tmp_path) -> None:
         """A filled post-only entry is a maker fill, so it must be a LIMIT trade."""
@@ -139,9 +147,10 @@ class TestPostOnlyReachesTheBacktest:
 
     def test_market_execution_still_works(self, tmp_path) -> None:
         """The market path is the control: it never depended on the pending queue."""
-        summary, conn = _run(tmp_path, _mr_config("market", "market"), "market")
+        _, conn = _run(tmp_path, _mr_config("market", "market"), "market")
 
-        assert summary.total_trades > 0
+        opened = conn.execute("SELECT COUNT(*) AS c FROM positions").fetchone()
+        assert int(opened["c"]) > 0
         order_types = {
             row["order_type"]
             for row in conn.execute("SELECT DISTINCT order_type FROM trades").fetchall()

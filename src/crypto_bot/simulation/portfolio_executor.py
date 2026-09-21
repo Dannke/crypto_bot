@@ -19,6 +19,7 @@ from typing import Any
 from ..config.env import Config
 from ..core.enums import Mode, OrderType, Side, TradeStatus
 from ..core.logging_setup import get_logger
+from ..core.types import Position
 from ..data.funding import FundingEvent, HistoricalFundingSource
 from ..data.instruments import InstrumentCache
 from ..execution.costs import CompositeCostModel, ExecutionCostModel
@@ -81,6 +82,14 @@ class PortfolioExecutor:
         )
         self._post_only_entry = mr_is_active and getattr(mr, 'entry_execution', None) == 'post_only'
         self._post_only_exit = mr_is_active and getattr(mr, 'exit_execution', None) == 'post_only'
+        # Зарегистрированная модель исполнения mean_reversion_v0 знает только три
+        # выхода: реверсия (|z| <= exit_threshold), time-stop (max_holding_bars) и
+        # рыночный fallback по таймауту. ATR-стопы навешивались общим портфельным
+        # слоем и перехватывали 97% выходов (47 stop_loss + 21 take_profit из 70
+        # сделок на реальных данных), подменяя maker-экономику на taker: 43.8%/год
+        # против 131.4%/год. Уровни продолжают храниться — колонки positions.stop
+        # и positions.take объявлены NOT NULL, — но для MR не проверяются.
+        self._sltp_exits_enabled = not mr_is_active
         self._post_only_entry_timeout_hours = 1
         self._post_only_exit_timeout_hours = 4
         self._pending_post_only_entries: dict[str, dict] = {}  # symbol -> {limit_price, side, timestamp, intent}
@@ -268,6 +277,34 @@ class PortfolioExecutor:
         )
 
     @property
+    def open_positions(self) -> tuple[Position, ...]:
+        """Открытая книга как ``core.types.Position`` — для ``PortfolioState``.
+
+        ``MeanReversionStrategy`` читает ``PortfolioState.positions``: по ним она
+        решает, держать ли инкумбента, сработала ли реверсия (|z| <= exit_threshold)
+        и не пора ли выйти по time-stop (``opened_at`` против ``max_holding_bars``).
+        Ни бэктестер, ни живой оркестратор эти позиции не передавали, поэтому
+        стратегия на каждом тике видела пустую книгу: выходы ``reversion`` и
+        ``time_stop`` не могли сработать ни разу, удержание инкумбентов не
+        работало, и состав набирался заново на каждом ребалансе.
+        """
+        return tuple(
+            Position(
+                symbol=paper_pos.symbol,
+                timeframe=paper_pos.timeframe,
+                side=paper_pos.side,
+                size=paper_pos.size,
+                entry_price=paper_pos.entry_price,
+                stop=paper_pos.stop_loss,
+                take=paper_pos.take_profit,
+                opened_at=paper_pos.entry_time,
+                status=paper_pos.status,
+            )
+            for paper_pos in self._tracker.positions
+            if paper_pos.is_open
+        )
+
+    @property
     def pending_post_only(self) -> tuple[tuple[str, str], ...]:
         """(symbol, timeframe) pairs that still have an unfilled post-only order.
 
@@ -299,6 +336,19 @@ class PortfolioExecutor:
         key = f"{symbol}:{timeframe}"
         pending = self._pending_post_only_entries.get(key)
         if not pending:
+            return results
+
+        # Halt обязан блокировать и исполнение уже размещённых заявок, а не
+        # только новые вызовы open_position. Иначе заявка, висевшая с прошлого
+        # бара, открывает позицию ПОСЛЕ объявления аварийной остановки:
+        # _process_post_only в цикле бэктестера стоит до гейта
+        # `if not self._emergency_halt_triggered`.
+        if self._emergency_halt:
+            logger.info(
+                "portfolio: cancelled post-only %s %s %s — emergency halt active",
+                pending['side'].value, symbol, timeframe,
+            )
+            del self._pending_post_only_entries[key]
             return results
 
         intent = pending['intent']
@@ -438,13 +488,19 @@ class PortfolioExecutor:
         conflict_resolution: str = "pessimistic",
         bar_timestamp_ms: int | None = None,
     ) -> dict[str, Any]:
-        """Close open positions whose SL/TP lies inside an OHLC bar's range."""
+        """Close open positions whose SL/TP lies inside an OHLC bar's range.
+
+        Не применяется к стратегиям, которые не регистрируют SL/TP как способ
+        выхода (см. ``_sltp_exits_enabled``).
+        """
         stats: dict[str, Any] = {
             "closed_by_sl": 0,
             "closed_by_tp": 0,
             "closed_by_sl_pnl": 0.0,
             "closed_by_tp_pnl": 0.0,
         }
+        if not self._sltp_exits_enabled:
+            return stats
 
         for paper_pos in list(self._tracker.positions):
             if not paper_pos.is_open:
@@ -712,7 +768,20 @@ class PortfolioExecutor:
         current_prices: dict[str, dict[str, float]] | None = None,
         closed_at_ms: int | None = None,
     ) -> dict[str, Any]:
-        """Emergency-close every open position."""
+        """Emergency-close every open position.
+
+        Снимает и висящие post-only заявки: вход после аварийного закрытия
+        недопустим, а выход держит ссылку на уже закрытую позицию и на
+        следующем баре упал бы с "Position is already closed".
+        """
+        cancelled = len(self._pending_post_only_entries) + len(
+            getattr(self, "_pending_post_only_exits", {})
+        )
+        if cancelled:
+            logger.info("portfolio: cancelled %d pending post-only order(s) on %s", cancelled, reason)
+        self._pending_post_only_entries.clear()
+        if hasattr(self, "_pending_post_only_exits"):
+            self._pending_post_only_exits.clear()
         stats: dict[str, Any] = {"closed": 0, "closed_pnl": 0.0}
 
         for paper_pos in list(self._tracker.positions):

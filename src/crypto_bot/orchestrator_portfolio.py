@@ -223,6 +223,7 @@ async def run_portfolio_orchestrator(config: Config) -> None:
                         mode=Mode.PAPER if is_paper else Mode.SIGNAL_ONLY,
                         equity=equity,
                         cash=equity,
+                        positions=executor.open_positions,
                     )
 
                     universe = UniverseSnapshot(

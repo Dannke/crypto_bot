@@ -275,6 +275,95 @@ class TestPostOnlyExecution:
         # Position should now be open
         assert len([p for p in ex.tracker.positions if p.is_open]) == 1
 
+    def test_halt_cancels_pending_post_only_entry(self, executor_post_only) -> None:
+        """Halt обязан блокировать исполнение УЖЕ размещённых заявок.
+
+        В цикле бэктестера _process_post_only стоит до гейта
+        `if not self._emergency_halt_triggered`, поэтому заявка с прошлого бара
+        иначе откроет позицию после объявления аварийной остановки.
+        """
+        ex, _db = executor_post_only
+        result = ex.open_position(
+            _intent("BTC/USDT", weight=0.5, side=Side.LONG),
+            entry_price=100.0,
+            atr_pct=1.0,
+            timestamp_ms=1_700_000_000_000,
+        )
+        assert result.handled
+
+        ex.emergency_halt = True
+
+        # Бар касается лимита — без гейта заявка исполнилась бы.
+        results = ex.process_post_only_entries(
+            "BTC/USDT", "1h", low=99.9, high=101.0, timestamp_ms=1_700_003_600_000
+        )
+        assert results == []
+        assert [p for p in ex.tracker.positions if p.is_open] == []
+        assert ex.pending_post_only == (), "заявка должна быть снята, а не висеть"
+
+    def test_no_crash_processing_post_only_exit_after_emergency_close(
+        self, executor_post_only
+    ) -> None:
+        """Кросс-барный сценарий целиком: halt -> следующий бар -> нет краша.
+
+        Именно он мотивировал фикс. Позиция открыта, для неё размещён post-only
+        выход, затем аварийное закрытие. На СЛЕДУЮЩЕМ баре обработка очереди
+        взяла бы из pending уже закрытую позицию и упала с
+        "Position is already closed" — причём _process_post_only вызывается вне
+        try/except бэктестера, то есть уронила бы весь прогон.
+        """
+        ex, _db = executor_post_only
+        ex.open_position(
+            _intent("BTC/USDT", weight=0.5, side=Side.LONG),
+            entry_price=100.0,
+            atr_pct=1.0,
+            timestamp_ms=1_700_000_000_000,
+        )
+        filled = ex.process_post_only_entries(
+            "BTC/USDT", "1h", low=99.9, high=101.0, timestamp_ms=1_700_003_600_000
+        )
+        assert len(filled) == 1
+        ex.close_position_for_symbol(
+            "BTC/USDT", "1h",
+            reason="rebalance",
+            exit_price=101.0,
+            closed_at_ms=1_700_003_600_000,
+        )
+        assert ex.pending_post_only != (), "post-only выход должен быть в очереди"
+
+        ex.close_all_positions("emergency_drawdown", closed_at_ms=1_700_007_200_000)
+        assert not [p for p in ex.tracker.positions if p.is_open]
+
+        # Следующий бар: очередь пуста, обработка не падает и ничего не делает.
+        exits = ex.process_post_only_exits(
+            "BTC/USDT", "1h", low=100.0, high=102.0,
+            timestamp_ms=1_700_010_800_000, close=101.0,
+        )
+        entries = ex.process_post_only_entries(
+            "BTC/USDT", "1h", low=99.0, high=101.0, timestamp_ms=1_700_010_800_000
+        )
+        assert exits == []
+        assert entries == []
+
+    def test_close_all_positions_clears_pending_post_only(self, executor_post_only) -> None:
+        """Аварийное закрытие снимает висящие заявки.
+
+        Иначе post-only выход на следующем баре возьмёт из pending уже закрытую
+        позицию и упадёт с "Position is already closed".
+        """
+        ex, _db = executor_post_only
+        ex.open_position(
+            _intent("BTC/USDT", weight=0.5, side=Side.LONG),
+            entry_price=100.0,
+            atr_pct=1.0,
+            timestamp_ms=1_700_000_000_000,
+        )
+        assert ex.pending_post_only != ()
+
+        ex.close_all_positions("emergency_drawdown", closed_at_ms=1_700_003_600_000)
+
+        assert ex.pending_post_only == ()
+
     def test_post_only_entry_timeout_cancels_order(self, executor_post_only) -> None:
         """Post-only entry cancels after timeout (1h) if not filled."""
         ex, db = executor_post_only

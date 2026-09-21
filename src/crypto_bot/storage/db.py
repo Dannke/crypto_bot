@@ -32,7 +32,23 @@ class Database:
             raise StorageError(f"cannot open database {self._path}: {exc}") from exc
         self._migrate()
 
+    def _read_schema_version(self) -> int:
+        """Текущая версия схемы, 0 если БД ещё пуста."""
+        try:
+            row = self._conn.execute(
+                "SELECT value FROM schema_meta WHERE key='schema_version'"
+            ).fetchone()
+        except sqlite3.OperationalError:
+            return 0  # schema_meta ещё не создана — новая БД
+        return int(row["value"]) if row else 0
+
     def _migrate(self) -> None:
+        # Версия фиксируется ДО применения migrations.sql. Сам скрипт в конце
+        # безусловно штампует последнюю версию, поэтому каждая _migrate_vN,
+        # перечитывая версию после executescript, видела уже финальное значение
+        # и выходила рано — вся цепочка v2..v10 не выполнялась никогда, а БД
+        # при этом отчитывалась как мигрированная.
+        self._schema_version_at_open = self._read_schema_version()
         try:
             sql = _MIGRATIONS_FILE.read_text(encoding="utf-8")
             self._conn.executescript(sql)
@@ -60,10 +76,7 @@ class Database:
         self._migrate_v10()
 
     def _migrate_v2(self) -> None:
-        existing = self._conn.execute(
-            "SELECT value FROM schema_meta WHERE key='schema_version'"
-        ).fetchone()
-        if existing and int(existing["value"]) >= 2:
+        if self._schema_version_at_open >= 2:
             return
         try:
             self._conn.executescript("""
@@ -79,10 +92,7 @@ class Database:
             pass
 
     def _migrate_v3(self) -> None:
-        existing = self._conn.execute(
-            "SELECT value FROM schema_meta WHERE key='schema_version'"
-        ).fetchone()
-        if existing and int(existing["value"]) >= 3:
+        if self._schema_version_at_open >= 3:
             return
         try:
             self._conn.executescript("""
@@ -95,10 +105,7 @@ class Database:
             pass
 
     def _migrate_v4(self) -> None:
-        existing = self._conn.execute(
-            "SELECT value FROM schema_meta WHERE key='schema_version'"
-        ).fetchone()
-        if existing and int(existing["value"]) >= 4:
+        if self._schema_version_at_open >= 4:
             return
         try:
             self._conn.executescript("""
@@ -112,10 +119,7 @@ class Database:
             pass
 
     def _migrate_v5(self) -> None:
-        existing = self._conn.execute(
-            "SELECT value FROM schema_meta WHERE key='schema_version'"
-        ).fetchone()
-        if existing and int(existing["value"]) >= 5:
+        if self._schema_version_at_open >= 5:
             return
         try:
             self._conn.executescript("""
@@ -129,10 +133,7 @@ class Database:
             pass
 
     def _migrate_v6(self) -> None:
-        existing = self._conn.execute(
-            "SELECT value FROM schema_meta WHERE key='schema_version'"
-        ).fetchone()
-        if existing and int(existing["value"]) >= 6:
+        if self._schema_version_at_open >= 6:
             return
         try:
             self._conn.executescript("""
@@ -165,10 +166,7 @@ class Database:
             pass
 
     def _migrate_v7(self) -> None:
-        existing = self._conn.execute(
-            "SELECT value FROM schema_meta WHERE key='schema_version'"
-        ).fetchone()
-        if existing and int(existing["value"]) >= 7:
+        if self._schema_version_at_open >= 7:
             return
         try:
             self._conn.executescript("""
@@ -185,10 +183,7 @@ class Database:
             pass
 
     def _migrate_v8(self) -> None:
-        existing = self._conn.execute(
-            "SELECT value FROM schema_meta WHERE key='schema_version'"
-        ).fetchone()
-        if existing and int(existing["value"]) >= 8:
+        if self._schema_version_at_open >= 8:
             return
         try:
             # Recreate positions table with updated closed_by CHECK constraint
@@ -239,10 +234,7 @@ class Database:
             pass
 
     def _migrate_v9(self) -> None:
-        existing = self._conn.execute(
-            "SELECT value FROM schema_meta WHERE key='schema_version'"
-        ).fetchone()
-        if existing and int(existing["value"]) >= 9:
+        if self._schema_version_at_open >= 9:
             return
         try:
             # Add state table for orchestrator persistence (R8)
@@ -260,11 +252,14 @@ class Database:
             pass
 
     def _migrate_v10(self) -> None:
-        existing = self._conn.execute(
-            "SELECT value FROM schema_meta WHERE key='schema_version'"
-        ).fetchone()
-        if existing and int(existing["value"]) >= 10:
+        if self._schema_version_at_open >= 10:
             return
+        # Пересоздание таблицы требует снять проверку внешних ключей: trades и
+        # decisions ссылаются на positions(id) с ON DELETE RESTRICT, и DROP TABLE
+        # иначе падает на любой БД, где уже есть сделки. PRAGMA нельзя менять
+        # внутри транзакции, поэтому выставляем её до executescript.
+        self._conn.commit()
+        self._conn.execute("PRAGMA foreign_keys = OFF;")
         try:
             # Recreate positions table with updated closed_by CHECK constraint
             # Added 'reversion' and 'time_stop' as valid close reasons for MeanReversionStrategy
@@ -311,8 +306,15 @@ class Database:
                     ON CONFLICT(key) DO UPDATE SET value='10';
             """)
             self._conn.commit()
-        except sqlite3.OperationalError:
-            pass
+        except sqlite3.Error as exc:
+            # Раньше здесь стоял `except sqlite3.OperationalError: pass`: любой
+            # сбой пересоздания таблицы гасился, а БД оставалась на старом CHECK,
+            # отчитываясь как мигрированная. Первый же выход reversion/time_stop
+            # падал бы с IntegrityError уже после того, как трекер закрыл позицию.
+            self._conn.rollback()
+            raise StorageError(f"migration v10 (positions.closed_by CHECK) failed: {exc}") from exc
+        finally:
+            self._conn.execute("PRAGMA foreign_keys = ON;")
 
     @property
     def conn(self) -> sqlite3.Connection:
