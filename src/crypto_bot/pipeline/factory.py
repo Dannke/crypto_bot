@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from ..config.schemas import Settings
+from ..config.schemas import RegimeConfig, Settings
 from ..core import policy
 from ..core.enums import StrategyType
 from ..core.exceptions import ConfigError
@@ -228,10 +228,15 @@ def build_decision_pipeline(
 
 def build_portfolio_decision_pipeline(
     settings: Settings,
-    regime_config=None,
+    regime_config: RegimeConfig | None = None,
 ) -> PortfolioDecisionPipeline:
-    """Create the feature-only portfolio decision pipeline from settings."""
-    from ..config.schemas import RegimeConfig
+    """Create the feature-only portfolio decision pipeline from settings.
+
+    ``regime_config=None`` означает «взять дефолты схемы», а НЕ «взять
+    ``settings.regime``»: вызывающий, у которого конфиг режима есть, обязан
+    передать его явно. Молчаливая подстановка дефолта уже приводила к тому,
+    что прогон терял ``strategy_overrides`` и шёл вообще без гейтинга.
+    """
     from ..pipeline.portfolio_fusion import create_regime_gated_fusion
 
     rc = regime_config or RegimeConfig()
