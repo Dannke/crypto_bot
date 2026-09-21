@@ -327,8 +327,8 @@ def build_portfolio_strategy(settings: Settings) -> PortfolioStrategy:
             entry_execution=mr.entry_execution,
             exit_execution=mr.exit_execution,
             min_expected_edge_bps=mr.min_expected_edge_bps,
-            top_fraction=1.0 - 0.90,  # Use fixed percentile or could be configurable
-            short_fraction=0.2,
+            top_fraction=1.0 - mr.long_percentile,
+            short_fraction=mr.short_percentile,
         )
     raise ConfigError(f"unsupported portfolio strategy {name!r}")
 

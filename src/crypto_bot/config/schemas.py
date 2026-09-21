@@ -274,6 +274,15 @@ class MeanReversionConfig(StrictConfigModel):
     weighting: Literal["equal", "inverse_vol"] = "inverse_vol"
     rebalance_hours: int = Field(default=12, ge=1)
     max_positions: int = Field(default=4, ge=1)
+    # Percentile cutoffs on the cross-sectional z-score rank, той же формы, что
+    # у CsmConfig: LONG берётся из верхних (1 - long_percentile) универсума,
+    # SHORT — из нижних short_percentile. Раньше эти доли были зашиты в
+    # pipeline/factory.py литералами 1.0 - 0.90 и 0.2, то есть 10% против 20%:
+    # асимметричный, нигде не зарегистрированный отбор, дававший систематический
+    # перекос книги в шорт. Дефолты симметричны и совпадают с собственными
+    # дефолтами MeanReversionStrategy (0.2 / 0.2).
+    long_percentile: float = Field(default=0.80, gt=0.0, lt=1.0)
+    short_percentile: float = Field(default=0.20, gt=0.0, lt=1.0)
     seed: int | None = Field(default=42, ge=0)
     # Post-only execution (maker-only)
     entry_execution: Literal["market", "post_only"] = "post_only"

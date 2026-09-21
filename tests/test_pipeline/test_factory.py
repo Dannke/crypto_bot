@@ -1,6 +1,8 @@
 """Tests for pipeline composition factory."""
 from __future__ import annotations
 
+import pytest
+
 from crypto_bot.config.schemas import Settings
 from crypto_bot.core.enums import Side, Signal
 from crypto_bot.core.types import FeatureSet
@@ -8,6 +10,7 @@ from crypto_bot.pipeline.factory import (
     DEFAULT_STRATEGY_NAME,
     build_decision_pipeline,
     build_filters,
+    build_portfolio_strategy,
     build_strategy_manager,
     resolve_rebalance_hours,
     scoring_weights_from_settings,
@@ -142,3 +145,51 @@ def test_resolve_rebalance_hours_does_not_leak_between_strategies():
     mean_reversion = _settings_with(MEAN_REVERSION_V0_STRATEGY_NAME, csm_hours, mr_hours)
 
     assert resolve_rebalance_hours(momentum) != resolve_rebalance_hours(mean_reversion)
+
+
+def _mr_settings(**mr_overrides) -> Settings:
+    """Settings на mean_reversion_v0 с переопределением полей MR."""
+    base = Settings()
+    mean_reversion = base.portfolio.mean_reversion.model_copy(update=mr_overrides)
+    portfolio = base.portfolio.model_copy(
+        update={"strategy_name": MEAN_REVERSION_V0_STRATEGY_NAME,
+                "mean_reversion": mean_reversion}
+    )
+    return base.model_copy(update={"portfolio": portfolio})
+
+
+def test_mr_percentiles_come_from_config():
+    """Доли отбора берутся из конфига, а не из литералов в фабрике."""
+    strategy = build_portfolio_strategy(
+        _mr_settings(long_percentile=0.70, short_percentile=0.30)
+    )
+    assert strategy.top_fraction == pytest.approx(0.30)
+    assert strategy.short_fraction == pytest.approx(0.30)
+
+
+def test_mr_default_percentiles_are_symmetric():
+    """Дефолтный отбор симметричен: перекос книги в шорт был дефектом.
+
+    Прямая регрессия: в фабрике стояли литералы 1.0 - 0.90 и 0.2, то есть
+    10% длинных кандидатов против 20% коротких. На train это дало книгу
+    26 LONG против 88 SHORT — уже не то явление, которое описывает гипотеза
+    о cross-sectional возврате к среднему.
+    """
+    strategy = build_portfolio_strategy(_mr_settings())
+
+    assert strategy.top_fraction == pytest.approx(strategy.short_fraction), (
+        f"доли отбора асимметричны: long={strategy.top_fraction} "
+        f"short={strategy.short_fraction}"
+    )
+
+
+def test_mr_percentiles_give_equal_sides_on_the_registered_universe():
+    """На зарегистрированном универсуме из 9 символов стороны равны по слотам."""
+    from math import ceil
+
+    strategy = build_portfolio_strategy(_mr_settings())
+    n_symbols = 9
+    n_long = ceil(strategy.top_fraction * n_symbols)
+    n_short = ceil(strategy.short_fraction * n_symbols)
+
+    assert n_long == n_short, f"{n_long} long против {n_short} short на {n_symbols} символах"

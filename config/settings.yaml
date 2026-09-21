@@ -111,6 +111,10 @@ portfolio:
     weighting: inverse_vol
     rebalance_hours: 12
     max_positions: 4
+    # LONG из верхних 1 - 0.80 = 20% ранга, SHORT из нижних 20%. На универсуме
+    # из 9 символов это 2 long + 2 short за тик, то есть ровно max_positions=4.
+    long_percentile: 0.80
+    short_percentile: 0.20
     entry_execution: post_only
     exit_execution: post_only
     min_expected_edge_bps: 10
