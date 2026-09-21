@@ -92,6 +92,42 @@ risk:
   enable_correlation_filter: true
   correlation_lookback_bars: 168
 
+# Портфельный слой. Все значения выписаны явно, даже совпадающие с дефолтами
+# схемы: именно молчаливая опора на совпадение дефолтов с зарегистрированной
+# сеткой скрывала расхождение конфига и pre-registration v4.
+portfolio:
+  strategy_name: mean_reversion_v0
+
+  # Сетка mean_reversion v4. Значения идентичны дефолтам MeanReversionConfig,
+  # поэтому поведение этим блоком не меняется — он фиксирует их явно, чтобы
+  # правка дефолта в схеме не сдвинула зарегистрированную конфигурацию молча.
+  mean_reversion:
+    timeframe: 1h
+    zscore_window_bars: 48
+    signal_lookback: "8h"
+    entry_threshold: 2.0
+    exit_threshold: 0.5
+    max_holding_bars: 48        # баров при 1h = 48 часов
+    weighting: inverse_vol
+    rebalance_hours: 12
+    max_positions: 4
+    entry_execution: post_only
+    exit_execution: post_only
+    min_expected_edge_bps: 10
+    seed: 42
+
+  # Риск-лимиты из снимка v4. ЭТОТ блок поведение меняет: до сих пор
+  # действовали дефолты схемы (max_positions=5, max_position_weight=0.5,
+  # max_leverage=10.0, maintenance_margin_buffer_pct=0.1), и измеренный пик
+  # одновременных позиций на train упирался в 5, а не в зарегистрированные 4.
+  risk:
+    max_positions: 4
+    max_position_weight: 1.0
+    max_gross_exposure: 1.0
+    max_net_exposure: 1.0
+    max_leverage: 5.0
+    maintenance_margin_buffer_pct: 0.05
+
 storage:
   db_path: data/crypto_bot.db
 
