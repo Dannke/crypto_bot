@@ -9,7 +9,12 @@ from crypto_bot.pipeline.factory import (
     build_decision_pipeline,
     build_filters,
     build_strategy_manager,
+    resolve_rebalance_hours,
     scoring_weights_from_settings,
+)
+from crypto_bot.strategy.portfolio_strategies import (
+    MEAN_REVERSION_V0_STRATEGY_NAME,
+    MOMENTUM_V0_STRATEGY_NAME,
 )
 from crypto_bot.strategy.signal_engine import SignalEngine
 
@@ -96,3 +101,44 @@ def test_build_decision_pipeline_processes_batch():
     assert selected.signal == Signal.BUY
     assert selected.side == Side.LONG
     assert selected.explanation
+
+
+def _settings_with(strategy_name: str, csm_hours: int, mr_hours: int) -> Settings:
+    """Settings, где каденции CSM и mean_reversion заведомо различимы."""
+    base = Settings()
+    portfolio = base.portfolio.model_copy(
+        update={
+            "strategy_name": strategy_name,
+            "csm": base.portfolio.csm.model_copy(update={"rebalance_hours": csm_hours}),
+            "mean_reversion": base.portfolio.mean_reversion.model_copy(
+                update={"rebalance_hours": mr_hours}
+            ),
+        }
+    )
+    return base.model_copy(update={"portfolio": portfolio})
+
+
+def test_resolve_rebalance_hours_uses_mean_reversion_block():
+    """Активная MR-стратегия читает свою каденцию, а не CSM-блок."""
+    settings = _settings_with(MEAN_REVERSION_V0_STRATEGY_NAME, csm_hours=24, mr_hours=12)
+    assert resolve_rebalance_hours(settings) == 12
+
+
+def test_resolve_rebalance_hours_uses_csm_block_for_momentum():
+    """CSM-стратегия остаётся на своей каденции — прежнее поведение."""
+    settings = _settings_with(MOMENTUM_V0_STRATEGY_NAME, csm_hours=24, mr_hours=12)
+    assert resolve_rebalance_hours(settings) == 24
+
+
+def test_resolve_rebalance_hours_does_not_leak_between_strategies():
+    """Одна и та же конфигурация даёт разную каденцию под разные стратегии.
+
+    Прямая регрессия на дефект: оба потребителя читали csm.rebalance_hours
+    независимо от активной стратегии, поэтому MR молча ребалансировался с
+    каденцией CSM.
+    """
+    csm_hours, mr_hours = 24, 6
+    momentum = _settings_with(MOMENTUM_V0_STRATEGY_NAME, csm_hours, mr_hours)
+    mean_reversion = _settings_with(MEAN_REVERSION_V0_STRATEGY_NAME, csm_hours, mr_hours)
+
+    assert resolve_rebalance_hours(momentum) != resolve_rebalance_hours(mean_reversion)

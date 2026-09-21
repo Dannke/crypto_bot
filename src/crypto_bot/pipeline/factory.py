@@ -333,6 +333,26 @@ def build_portfolio_strategy(settings: Settings) -> PortfolioStrategy:
     raise ConfigError(f"unsupported portfolio strategy {name!r}")
 
 
+def resolve_rebalance_hours(settings: Settings) -> int:
+    """Каденция ребалансировки активной стратегии, в часах.
+
+    Единственный источник истины для обоих потребителей — бэктестера и
+    живого portfolio-оркестратора. Оба раньше читали ``csm.rebalance_hours``
+    напрямую, поэтому mean_reversion молча ребалансировался с каденцией CSM
+    (24ч) вместо своей собственной.
+
+    Стратегии без собственного поля каденции остаются на CSM-блоке — это
+    их прежнее поведение, а не новый дефолт.
+    """
+    portfolio = settings.portfolio
+    if getattr(portfolio, "strategy_name", None) == MEAN_REVERSION_V0_STRATEGY_NAME:
+        mean_reversion = getattr(portfolio, "mean_reversion", None)
+        if mean_reversion is not None:
+            return int(mean_reversion.rebalance_hours)
+    csm = getattr(portfolio, "csm", None)
+    return int(csm.rebalance_hours) if csm is not None else 24
+
+
 def get_active_strategy(manager: StrategyManager) -> CandidateStrategy:
     """Return the default active candidate strategy or raise if missing."""
     strategy = manager.get_default_strategy()

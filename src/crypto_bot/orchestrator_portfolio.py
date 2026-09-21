@@ -31,6 +31,7 @@ from .pipeline.factory import (
     build_portfolio_decision_pipeline,
     build_portfolio_risk_engine,
     build_portfolio_strategy,
+    resolve_rebalance_hours,
 )
 from .portfolio import PortfolioState
 from .portfolio.models import UniverseSnapshot
@@ -134,8 +135,7 @@ async def run_portfolio_orchestrator(config: Config) -> None:
     is_paper = settings.runtime.mode == Mode.PAPER
 
     # R8: Rebalance scheduler with persistence
-    csm = getattr(settings.portfolio, "csm", None)
-    rebalance_hours = (csm.rebalance_hours if csm is not None else 24)
+    rebalance_hours = resolve_rebalance_hours(settings)
     rebalance_ms = rebalance_hours * 3_600_000
 
     # R8: Separate regime cadence (default 1 hour, configurable)

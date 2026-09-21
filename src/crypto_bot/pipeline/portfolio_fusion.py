@@ -141,11 +141,24 @@ class RegimeGatedFusion:
             if pi.target_weight * mult > 0
         )
 
+        # Закрытия — авторская атрибуция стратегии, а не веса: их нельзя
+        # терять при пересборке интента. Потерянный close не отменяет выход
+        # (позиция всё равно уйдёт из целевой книги), но лишает его причины —
+        # ниже по течению он молча становится "rebalance".
+        # Ключ (symbol, timeframe) совпадает с ключом exit_reasons у
+        # потребителя (backtester._rebalance_positions); при нескольких
+        # интентах первая причина на ключ побеждает.
+        merged_closes: dict[tuple[str, str], tuple[str, str, str]] = {}
+        for intent in intents:
+            for close in intent.closes:
+                merged_closes.setdefault((close[0], close[1]), close)
+
         # Use the first intent's metadata
         base = intents[0]
         return PortfolioIntent(
             as_of_ms=regime.as_of_ms,
             intents=scaled_intents,
+            closes=tuple(merged_closes.values()),
             universe=base.universe,
             strategy_name=base.strategy_name,
         )
