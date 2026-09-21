@@ -128,6 +128,19 @@ portfolio:
     max_leverage: 5.0
     maintenance_margin_buffer_pct: 0.05
 
+# Режимный гейтинг. В снимке v4 этот блок ошибочно вложен под portfolio:, тогда
+# как regime — поле верхнего уровня Settings, и PortfolioConfig со
+# extra="forbid" такую вложенность отвергает: снимок нельзя было вставить
+# дословно. Ключи обязаны быть в форме exposure_<режим> — этого требует
+# RegimeConfig._regime_sanity, и по ней же теперь ищет потребитель.
+regime:
+  strategy_overrides:
+    mean_reversion_v0:
+      exposure_trend_low_vol: 0.25
+      exposure_trend_high_vol: 0.0
+      exposure_range_low_vol: 1.0
+      exposure_range_high_vol: 0.5
+
 storage:
   db_path: data/crypto_bot.db
 

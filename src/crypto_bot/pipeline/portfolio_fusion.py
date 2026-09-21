@@ -79,12 +79,20 @@ class RegimeGatedFusion:
 
     def _get_multiplier(self, strategy_name: str | None, regime: str) -> float:
         """Get the exposure multiplier for a strategy and regime.
-        
+
         Strategies with explicit overrides use their per-regime multipliers.
         Strategies without overrides get 1.0 (no regime gating).
+
+        Ключ ищется в форме ``exposure_<regime>``, потому что контракт задаёт
+        схема: ``RegimeConfig._regime_sanity`` принимает только
+        ``exposure_trend_low_vol`` и три его аналога, а голое имя режима
+        отвергает. ``RegimeSnapshot.regime`` при этом приходит голым
+        (``trend_high_vol``), поэтому раньше поиск по нему не находил ничего
+        и любой валидный override молча давал 1.0 — гейтинг был не «не
+        настроен», а неконфигурируем в принципе.
         """
         if strategy_name and strategy_name in self._strategy_overrides:
-            override = self._strategy_overrides[strategy_name].get(regime)
+            override = self._strategy_overrides[strategy_name].get(f"exposure_{regime}")
             if override is not None:
                 return override
         # No override for this strategy -> no regime gating (multiplier 1.0)
