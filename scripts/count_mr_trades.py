@@ -79,6 +79,26 @@ def diagnostic_config(config_path: Path, entry_threshold: float) -> Config:
     return Config(settings=settings, env=loaded.env)
 
 
+class FailedTicks(logging.Handler):
+    """Тики, которые бэктестер потерял целиком: исключение в пайплайне тика.
+
+    Бэктестер ловит такое исключение широким except и пишет «bt: pipeline failed
+    at ts=...» — вместе с тиком теряются и входы, и выходы. Счёт сделок обязан
+    говорить, сколько тиков выпало и где.
+    """
+
+    PREFIX = "bt: pipeline failed at ts="
+
+    def __init__(self) -> None:
+        super().__init__(level=logging.ERROR)
+        self.ts: list[int] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        message = record.getMessage()
+        if message.startswith(self.PREFIX):
+            self.ts.append(int(message[len(self.PREFIX):].split(":", 1)[0]))
+
+
 def max_concurrent(intervals: list[tuple[int, int]]) -> int:
     events = sorted([(o, 1) for o, _ in intervals] + [(c, -1) for _, c in intervals],
                     key=lambda e: (e[0], e[1]))
@@ -109,7 +129,10 @@ def main() -> int:
         parser.error("--onsets-train и --onsets-test задаются вместе")
 
     config = diagnostic_config(Path(args.config), args.entry_threshold)
-    logging.getLogger("crypto_bot").setLevel(logging.WARNING)
+    project_logger = logging.getLogger("crypto_bot")
+    project_logger.setLevel(logging.WARNING)
+    failed_ticks = FailedTicks()
+    project_logger.addHandler(failed_ticks)
     mr = config.settings.portfolio.mean_reversion
 
     symbols = list(args.symbols)
@@ -167,6 +190,9 @@ def main() -> int:
     print(f"пик одновременно открытых позиций = "
           f"{max_concurrent([(r[4], r[5] if r[5] is not None else hi) for r in rows])}")
     print(f"отказы риск-движка по причинам (записи decisions): {dict(rejected)}")
+    in_segment = [ts for ts in failed_ticks.ts if lo <= ts <= hi]
+    span = f"{fmt(min(in_segment))} .. {fmt(max(in_segment))}" if in_segment else "-"
+    print(f"тиков, потерянных пайплайном целиком (исключение в тике): {len(in_segment)}; {span}")
 
     if args.onsets_train is None:
         return 0

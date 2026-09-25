@@ -81,6 +81,14 @@ def _flatten(node: Any, prefix: str = "") -> dict[str, Any]:
 def _effective(settings: Any, path: str) -> Any:
     node: Any = settings
     for part in path.split("."):
+        # Поля-словари схемы (risk.take_profit_risk_multiple и т.п.) _flatten
+        # разворачивает по ключам так же, как секции. getattr ключ словаря не
+        # находит, и такое поле раньше было нельзя объявить без ложного MISMATCH.
+        if isinstance(node, dict):
+            if part not in node:
+                return "<НЕТ ТАКОГО КЛЮЧА>"
+            node = node[part]
+            continue
         if not hasattr(node, part):
             return "<НЕТ ТАКОГО ПОЛЯ В СХЕМЕ>"
         node = getattr(node, part)
