@@ -1,0 +1,154 @@
+# =============================================================================
+# crypto_bot — strategy, risk & runtime configuration.
+# Copy to "config/settings.yaml" (gitignored). Validated by pydantic schemas in
+# src/crypto_bot/config/schemas.py. Runtime-mode policy (e.g. refusing to start
+# in LIVE until paper + tests are ready) is enforced by the orchestrator, not here.
+# =============================================================================
+
+runtime:
+  mode: signal_only        # signal_only | paper | live
+  loop_interval_seconds: 60
+  timezone: UTC
+  strategy: per_timeframe
+
+exchange:
+  name: bybit
+  sandbox: false            # use testnet/sandbox endpoints
+  rate_limit_ms: 75     # conservative per-request spacing
+
+timeframes:
+  primary: ["15m", "1h", "4h"]   # trigger / confirmation / trend
+  candles_per_tf: 400            # must cover ema_slow(200)+margin (~2x for EMA warmup); >=210 enforced
+
+strategy:
+  trend:
+    ema_fast: 21
+    ema_mid: 50
+    ema_slow: 200
+    adx_min: 20.0          # ignore weak/choppy trends below this
+  momentum:
+    rsi_period: 14
+    rsi_long_min: 50.0     # longs need RSI in [50, 70]
+    rsi_long_max: 70.0
+    rsi_short_min: 30.0    # shorts need RSI in [30, 50]
+    rsi_short_max: 50.0
+  volatility:
+    atr_period: 14
+    atr_min_pct:
+      15m: 0.25      # empirical — pass rate ~78-100%
+      1h: 0.5        # unchanged — 89-100% pass, not a bottleneck
+      4h: 0.5        # unchanged — 100% pass, not a bottleneck
+    atr_max_pct:
+      15m: 8.0
+      1h: 8.0
+      4h: 8.0
+    bb_period: 20
+    bb_std: 2.0
+  volume:
+    ma_period: 20
+    # Set at ~p63 of the retrospective volume_spike_ratio distribution (n=36,
+    # median p60~0.93, median p65~1.03).  1.0 = volume >= 20-period MA, roughly
+    # 40% pass rate (~17% at previous 1.5).  Re-tune if the distribution shifts.
+    spike_ratio: 1.0
+
+scoring:
+  weights:
+    trend: 0.25
+    momentum: 0.15
+    volume: 0.15
+    volatility: 0.10
+    liquidity: 0.10
+    spread: 0.05
+    risk: 0.20
+  # Median retrospective optimistic_p50 across 9 symbols × 3 TFs (15m/1h/4h,
+  # 5m excluded because its fully_tradeable_rate≈0 gave a misleadingly low
+  # aggregate).  Min 61.1 / max 68.1 / p50=62.9.  Re-tune if distribution shifts.
+  min_score: 63.0
+  min_confidence: 0.6      # 0..1, cross-timeframe agreement threshold
+  max_candidates_per_cycle: 3
+
+filters:
+  min_quote_volume_usd: 5000000.0
+  max_spread_pct: 0.15
+  blacklist: []
+  cooldown_after_trade_minutes: 240   # no re-entry on a symbol after a trade
+
+risk:
+  equity_currency: USDT
+  risk_per_trade_pct: 1.0
+  take_profit_risk_multiple:
+    15m: 2.0
+    1h: 2.0
+    4h: 2.0
+  max_stop_distance_pct: 3.0
+  max_open_positions: 5
+  max_daily_drawdown_pct: 3.0
+  emergency_drawdown_pct: 25.0
+  max_open_unrealized_drawdown_pct: 3.0
+
+  # R8: Correlation and clustering risk controls
+  max_correlation: 0.7
+  max_correlated_positions: 2
+  enable_correlation_filter: true
+  correlation_lookback_bars: 168
+
+# Портфельный слой. Все значения выписаны явно, даже совпадающие с дефолтами
+# схемы: именно молчаливая опора на совпадение дефолтов с зарегистрированной
+# сеткой скрывала расхождение конфига и pre-registration v4.
+portfolio:
+  strategy_name: mean_reversion_v0
+
+  # Сетка mean_reversion v4. Значения идентичны дефолтам MeanReversionConfig,
+  # поэтому поведение этим блоком не меняется — он фиксирует их явно, чтобы
+  # правка дефолта в схеме не сдвинула зарегистрированную конфигурацию молча.
+  mean_reversion:
+    timeframe: 1h
+    zscore_window_bars: 48
+    signal_lookback: "8h"
+    entry_threshold: 2.0
+    exit_threshold: 0.5
+    max_holding_bars: 48        # баров при 1h = 48 часов
+    weighting: inverse_vol
+    rebalance_hours: 12
+    max_positions: 4
+    # LONG из верхних 1 - 0.80 = 20% ранга, SHORT из нижних 20%. На универсуме
+    # из 9 символов это 2 long + 2 short за тик, то есть ровно max_positions=4.
+    long_percentile: 0.80
+    short_percentile: 0.20
+    entry_execution: post_only
+    exit_execution: post_only
+    min_expected_edge_bps: 10
+    seed: 42
+
+  # Риск-лимиты из снимка v4. ЭТОТ блок поведение меняет: до сих пор
+  # действовали дефолты схемы (max_positions=5, max_position_weight=0.5,
+  # max_leverage=10.0, maintenance_margin_buffer_pct=0.1), и измеренный пик
+  # одновременных позиций на train упирался в 5, а не в зарегистрированные 4.
+  risk:
+    max_positions: 4
+    max_position_weight: 1.0
+    max_gross_exposure: 1.0
+    max_net_exposure: 1.0
+    max_leverage: 5.0
+    maintenance_margin_buffer_pct: 0.05
+
+# Режимный гейтинг. В снимке v4 этот блок ошибочно вложен под portfolio:, тогда
+# как regime — поле верхнего уровня Settings, и PortfolioConfig со
+# extra="forbid" такую вложенность отвергает: снимок нельзя было вставить
+# дословно. Ключи обязаны быть в форме exposure_<режим> — этого требует
+# RegimeConfig._regime_sanity, и по ней же теперь ищет потребитель.
+regime:
+  strategy_overrides:
+    mean_reversion_v0:
+      exposure_trend_low_vol: 0.25
+      exposure_trend_high_vol: 0.0
+      exposure_range_low_vol: 1.0
+      exposure_range_high_vol: 0.5
+
+storage:
+  db_path: data/crypto_bot.db
+
+logging:
+  level: INFO
+  file: logs/crypto_bot.log
+  json: false

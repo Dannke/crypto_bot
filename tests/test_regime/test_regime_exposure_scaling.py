@@ -154,7 +154,7 @@ class TestRegimeExposureScaling:
         fusion = RegimeGatedFusion(
             strategy_overrides={
                 "mean_reversion_v0": {
-                    "trend_high_vol": 0.5,
+                    "exposure_trend_high_vol": 0.5,
                 }
             }
         )
@@ -196,7 +196,7 @@ class TestRegimeExposureScaling:
         fusion = RegimeGatedFusion(
             strategy_overrides={
                 "mean_reversion_v0": {
-                    "range_low_vol": 0.25,
+                    "exposure_range_low_vol": 0.25,
                 }
             }
         )
@@ -238,7 +238,7 @@ class TestRegimeExposureScaling:
         fusion = RegimeGatedFusion(
             strategy_overrides={
                 "mean_reversion_v0": {
-                    "range_high_vol": 0.0,
+                    "exposure_range_high_vol": 0.0,
                 }
             }
         )
@@ -280,7 +280,7 @@ class TestRegimeExposureScaling:
         fusion = RegimeGatedFusion(
             strategy_overrides={
                 "mean_reversion_v0": {
-                    "trend_high_vol": 0.5,
+                    "exposure_trend_high_vol": 0.5,
                 }
             }
         )
@@ -298,7 +298,7 @@ class TestRegimeExposureScaling:
         fused_long = RegimeGatedFusion(
             strategy_overrides={
                 "mean_reversion_v0": {
-                    "trend_high_vol": 0.5,
+                    "exposure_trend_high_vol": 0.5,
                 }
             }
         ).fuse([intent_long], regime_high)
@@ -308,7 +308,7 @@ class TestRegimeExposureScaling:
         fused_short = RegimeGatedFusion(
             strategy_overrides={
                 "mean_reversion_v0": {
-                    "trend_high_vol": 0.5,
+                    "exposure_trend_high_vol": 0.5,
                 }
             }
         ).fuse([intent_short], regime_high)
@@ -330,10 +330,10 @@ class TestRegimeExposureScaling:
         fusion = RegimeGatedFusion(
             strategy_overrides={
                 "mean_reversion_v0": {
-                    "trend_low_vol": 0.25,
-                    "trend_high_vol": 0.0,
-                    "range_low_vol": 1.0,
-                    "range_high_vol": 0.5,
+                    "exposure_trend_low_vol": 0.25,
+                    "exposure_trend_high_vol": 0.0,
+                    "exposure_range_low_vol": 1.0,
+                    "exposure_range_high_vol": 0.5,
                 }
             }
         )
@@ -367,7 +367,7 @@ class TestRegimeExposureScaling:
         fusion = RegimeGatedFusion(
             strategy_overrides={
                 "mean_reversion_v0": {
-                    "trend_low_vol": 0.25,
+                    "exposure_trend_low_vol": 0.25,
                 }
             }
         )
@@ -383,6 +383,69 @@ class TestRegimeExposureScaling:
         )
         fused = fusion.fuse([intent], regime_trend)
         assert abs(fused.intents[0].target_weight - 0.5) < 1e-6  # 0.5 * 1.0 (no override for CSM)
+
+
+
+class TestOverridesSurviveTheConfigPath:
+    """Гейтинг должен работать через реальный путь конфига, а не только в юните.
+
+    Класс дефекта, ради которого написан этот класс тестов: обе стороны
+    контракта были покрыты порознь и обе «проходили». Схема
+    ``RegimeConfig._regime_sanity`` принимала только ключи вида
+    ``exposure_trend_high_vol``; потребитель
+    ``RegimeGatedFusion._get_multiplier`` искал голое ``trend_high_vol``.
+    Совпасть они не могли, поэтому любой валидный override давал множитель
+    1.0 — гейтинг был неконфигурируем в принципе. Юнит-тесты этого не ловили,
+    потому что конструировали fusion напрямую, минуя валидацию схемы.
+
+    Поэтому здесь путь целиком: RegimeConfig -> фабрика -> fusion.
+    """
+
+    @staticmethod
+    def _pipeline_fusion(overrides: dict[str, dict[str, float]]):
+        from crypto_bot.config.schemas import Settings
+        from crypto_bot.pipeline.factory import build_portfolio_decision_pipeline
+
+        settings = Settings()
+        regime_config = settings.regime.model_copy(update={"strategy_overrides": overrides})
+        pipeline = build_portfolio_decision_pipeline(settings, regime_config=regime_config)
+        return pipeline._fusion
+
+    def test_override_from_schema_keys_actually_gates(self):
+        """Ключи в форме, которую требует схема, должны доезжать до множителя."""
+        fusion = self._pipeline_fusion({
+            "mean_reversion_v0": {
+                "exposure_trend_low_vol": 0.25,
+                "exposure_trend_high_vol": 0.0,
+                "exposure_range_low_vol": 1.0,
+                "exposure_range_high_vol": 0.5,
+            }
+        })
+
+        got = {
+            regime: fusion._get_multiplier("mean_reversion_v0", regime)
+            for regime in ("trend_low_vol", "trend_high_vol", "range_low_vol", "range_high_vol")
+        }
+
+        assert got == {
+            "trend_low_vol": 0.25,
+            "trend_high_vol": 0.0,
+            "range_low_vol": 1.0,
+            "range_high_vol": 0.5,
+        }, f"override не доезжает до множителя: {got}"
+
+    def test_schema_rejects_the_key_form_the_consumer_used_to_expect(self):
+        """Голое имя режима схема обязана отвергать — иначе контракт снова двоится."""
+        with pytest.raises(ValueError, match="unknown exposure key"):
+            RegimeConfig(strategy_overrides={"mean_reversion_v0": {"trend_high_vol": 0.0}})
+
+    def test_strategy_without_overrides_is_not_gated(self):
+        """Стратегия без override остаётся без гейтинга — прежнее поведение."""
+        fusion = self._pipeline_fusion({
+            "mean_reversion_v0": {"exposure_trend_high_vol": 0.0}
+        })
+        assert fusion._get_multiplier("cross_sectional_momentum_v0", "trend_high_vol") == 1.0
+
 
 
 if __name__ == "__main__":

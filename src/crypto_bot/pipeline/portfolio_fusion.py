@@ -79,12 +79,20 @@ class RegimeGatedFusion:
 
     def _get_multiplier(self, strategy_name: str | None, regime: str) -> float:
         """Get the exposure multiplier for a strategy and regime.
-        
+
         Strategies with explicit overrides use their per-regime multipliers.
         Strategies without overrides get 1.0 (no regime gating).
+
+        Ключ ищется в форме ``exposure_<regime>``, потому что контракт задаёт
+        схема: ``RegimeConfig._regime_sanity`` принимает только
+        ``exposure_trend_low_vol`` и три его аналога, а голое имя режима
+        отвергает. ``RegimeSnapshot.regime`` при этом приходит голым
+        (``trend_high_vol``), поэтому раньше поиск по нему не находил ничего
+        и любой валидный override молча давал 1.0 — гейтинг был не «не
+        настроен», а неконфигурируем в принципе.
         """
         if strategy_name and strategy_name in self._strategy_overrides:
-            override = self._strategy_overrides[strategy_name].get(regime)
+            override = self._strategy_overrides[strategy_name].get(f"exposure_{regime}")
             if override is not None:
                 return override
         # No override for this strategy -> no regime gating (multiplier 1.0)
@@ -141,11 +149,24 @@ class RegimeGatedFusion:
             if pi.target_weight * mult > 0
         )
 
+        # Закрытия — авторская атрибуция стратегии, а не веса: их нельзя
+        # терять при пересборке интента. Потерянный close не отменяет выход
+        # (позиция всё равно уйдёт из целевой книги), но лишает его причины —
+        # ниже по течению он молча становится "rebalance".
+        # Ключ (symbol, timeframe) совпадает с ключом exit_reasons у
+        # потребителя (backtester._rebalance_positions); при нескольких
+        # интентах первая причина на ключ побеждает.
+        merged_closes: dict[tuple[str, str], tuple[str, str, str]] = {}
+        for intent in intents:
+            for close in intent.closes:
+                merged_closes.setdefault((close[0], close[1]), close)
+
         # Use the first intent's metadata
         base = intents[0]
         return PortfolioIntent(
             as_of_ms=regime.as_of_ms,
             intents=scaled_intents,
+            closes=tuple(merged_closes.values()),
             universe=base.universe,
             strategy_name=base.strategy_name,
         )

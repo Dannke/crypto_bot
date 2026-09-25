@@ -2,7 +2,11 @@
 .env
 .env.*
 !.env.example
-config/settings.yaml
+# config/settings.yaml НЕ игнорируется: это операционный конфиг, которым
+# получены все исследовательские числа. Пока он лежал вне version control,
+# "Config Snapshot" в pre-registration был единственной его записью, и сверить
+# их было нечем — расхождение по шести полям копилось незамеченным. Секретов в
+# нём нет: ключи биржи живут в .env (config/env.py), он игнорируется выше.
 config/universe.yaml
 
 # --- Runtime data & logs ---

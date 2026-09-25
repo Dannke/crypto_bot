@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from ..config.schemas import Settings
+from ..config.schemas import RegimeConfig, Settings
 from ..core import policy
 from ..core.enums import StrategyType
 from ..core.exceptions import ConfigError
@@ -228,10 +228,15 @@ def build_decision_pipeline(
 
 def build_portfolio_decision_pipeline(
     settings: Settings,
-    regime_config=None,
+    regime_config: RegimeConfig | None = None,
 ) -> PortfolioDecisionPipeline:
-    """Create the feature-only portfolio decision pipeline from settings."""
-    from ..config.schemas import RegimeConfig
+    """Create the feature-only portfolio decision pipeline from settings.
+
+    ``regime_config=None`` означает «взять дефолты схемы», а НЕ «взять
+    ``settings.regime``»: вызывающий, у которого конфиг режима есть, обязан
+    передать его явно. Молчаливая подстановка дефолта уже приводила к тому,
+    что прогон терял ``strategy_overrides`` и шёл вообще без гейтинга.
+    """
     from ..pipeline.portfolio_fusion import create_regime_gated_fusion
 
     rc = regime_config or RegimeConfig()
@@ -327,10 +332,30 @@ def build_portfolio_strategy(settings: Settings) -> PortfolioStrategy:
             entry_execution=mr.entry_execution,
             exit_execution=mr.exit_execution,
             min_expected_edge_bps=mr.min_expected_edge_bps,
-            top_fraction=1.0 - 0.90,  # Use fixed percentile or could be configurable
-            short_fraction=0.2,
+            top_fraction=1.0 - mr.long_percentile,
+            short_fraction=mr.short_percentile,
         )
     raise ConfigError(f"unsupported portfolio strategy {name!r}")
+
+
+def resolve_rebalance_hours(settings: Settings) -> int:
+    """Каденция ребалансировки активной стратегии, в часах.
+
+    Единственный источник истины для обоих потребителей — бэктестера и
+    живого portfolio-оркестратора. Оба раньше читали ``csm.rebalance_hours``
+    напрямую, поэтому mean_reversion молча ребалансировался с каденцией CSM
+    (24ч) вместо своей собственной.
+
+    Стратегии без собственного поля каденции остаются на CSM-блоке — это
+    их прежнее поведение, а не новый дефолт.
+    """
+    portfolio = settings.portfolio
+    if getattr(portfolio, "strategy_name", None) == MEAN_REVERSION_V0_STRATEGY_NAME:
+        mean_reversion = getattr(portfolio, "mean_reversion", None)
+        if mean_reversion is not None:
+            return int(mean_reversion.rebalance_hours)
+    csm = getattr(portfolio, "csm", None)
+    return int(csm.rebalance_hours) if csm is not None else 24
 
 
 def get_active_strategy(manager: StrategyManager) -> CandidateStrategy:

@@ -137,24 +137,56 @@ class TestFieldsThatAreWired:
             "entry_threshold=99 не остановил входы — порог не доезжает до отбора"
         )
 
-
-class TestFieldsThatAreNotWired:
-    """Подтверждённые разрывы проводки. strict=True — если починят, тест упадёт."""
-
-    @pytest.mark.xfail(
-        strict=True,
-        reason=(
-            "exit_threshold влияет только на PortfolioIntent.closes, а fusion "
-            "(portfolio_fusion.py:146) пересобирает интент без этого поля — "
-            "выходы reversion до книги не доезжают, поведение не меняется"
-        ),
-    )
     def test_exit_threshold_changes_the_book(self, tmp_path) -> None:
+        """Регрессия на потерю `closes` в fusion (portfolio_fusion.py).
+
+        Разрыв был в пересборке PortfolioIntent без поля `closes`: выходы
+        стратегии не доезжали до книги, и поведение не зависело от
+        exit_threshold вовсе.
+        """
         tight = _run(tmp_path, _config(entry_threshold=3.0, exit_threshold=0.01), "exit_tight")
         loose = _run(tmp_path, _config(entry_threshold=3.0, exit_threshold=2.5), "exit_loose")
 
         as_tuples = lambda conn: [tuple(r) for r in _positions(conn)]  # noqa: E731
         assert as_tuples(tight) != as_tuples(loose), "exit_threshold не влияет на прогон"
+
+    def test_strategy_exit_reasons_reach_the_book(self, tmp_path) -> None:
+        """Выход стратегии должен закрываться своей причиной, не `rebalance`.
+
+        Это наблюдаемая сторона того же разрыва: пока `closes` терялся в
+        fusion, закрытия доходили до книги обезличенными, и атрибуция
+        выходов (`positions.closed_by`) была непригодна для статистики.
+        """
+        conn = _run(tmp_path, _config(entry_threshold=1.5, exit_threshold=0.5), "attribution")
+        reasons = {
+            row["closed_by"]
+            for row in conn.execute(
+                "SELECT DISTINCT closed_by FROM positions WHERE closed_by IS NOT NULL"
+            ).fetchall()
+        }
+
+        assert reasons, "ни одна позиция не закрыта — фикстура не порождает выходов"
+        assert reasons & {"reversion", "time_stop"}, (
+            f"все закрытия обезличены, причины стратегии не доезжают до книги: {reasons}"
+        )
+
+    def test_rebalance_hours_changes_decision_cadence(self, tmp_path) -> None:
+        """Регрессия на чтение чужой каденции (factory.resolve_rebalance_hours).
+
+        Разрыв был в том, что бэктестер и живой оркестратор читали
+        `csm.rebalance_hours` независимо от активной стратегии, поэтому
+        mean_reversion всегда ребалансировался с каденцией CSM.
+        """
+        fast = _run(tmp_path, _config(rebalance_hours=2), "rb_fast")
+        slow = _run(tmp_path, _config(rebalance_hours=48), "rb_slow")
+
+        assert len(_entry_instants(fast)) > len(_entry_instants(slow)), (
+            "каденция ребаланса не зависит от mean_reversion.rebalance_hours"
+        )
+
+
+class TestFieldsThatAreNotWired:
+    """Подтверждённые разрывы проводки. strict=True — если починят, тест упадёт."""
 
     @pytest.mark.xfail(
         strict=True,
@@ -172,19 +204,3 @@ class TestFieldsThatAreNotWired:
         wide = _peak_concurrent(_run(tmp_path, _config(max_positions=5), "mp_five"))
 
         assert wide > narrow, f"пик одинаков при max_positions=1 и 5 (оба {narrow})"
-
-    @pytest.mark.xfail(
-        strict=True,
-        reason=(
-            "backtester.py:203 и orchestrator_portfolio.py:138 читают "
-            "csm.rebalance_hours независимо от активной стратегии; "
-            "mean_reversion.rebalance_hours не доезжает до каденции прогона"
-        ),
-    )
-    def test_rebalance_hours_changes_decision_cadence(self, tmp_path) -> None:
-        fast = _run(tmp_path, _config(rebalance_hours=2), "rb_fast")
-        slow = _run(tmp_path, _config(rebalance_hours=48), "rb_slow")
-
-        assert len(_entry_instants(fast)) > len(_entry_instants(slow)), (
-            "каденция ребаланса не зависит от mean_reversion.rebalance_hours"
-        )

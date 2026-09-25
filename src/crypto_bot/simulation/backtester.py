@@ -42,6 +42,7 @@ from ..pipeline.factory import (
     build_portfolio_strategy,
     build_strategy_manager,
     get_active_strategy,
+    resolve_rebalance_hours,
 )
 from ..portfolio import (
     CrossSectionalFeatureSnapshot,
@@ -200,7 +201,7 @@ class Backtester:
             )
             csm = getattr(settings.portfolio, "csm", None)
             self._rebalance_ms = (
-                (csm.rebalance_hours if csm is not None else 24) * 3_600_000
+                resolve_rebalance_hours(settings) * 3_600_000
                 if self._market_strategy
                 else 0
             )
