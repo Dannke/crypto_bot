@@ -98,32 +98,35 @@ risk:
 portfolio:
   strategy_name: mean_reversion_v0
 
-  # Сетка mean_reversion v4. Значения идентичны дефолтам MeanReversionConfig,
-  # поэтому поведение этим блоком не меняется — он фиксирует их явно, чтобы
-  # правка дефолта в схеме не сдвинула зарегистрированную конфигурацию молча.
+  # Сетка цикла 2: docs/research/mr_cycle2_signal_definition.md, разделы 1 и 4.
+  # Все значения выписаны явно, даже совпадающие с дефолтами схемы: дефолты
+  # MeanReversionConfig до сих пор несут сетку v4.
   mean_reversion:
     timeframe: 1h
-    zscore_window_bars: 48
-    signal_lookback: "8h"
-    entry_threshold: 2.0
-    exit_threshold: 0.5
-    max_holding_bars: 48        # баров при 1h = 48 часов
-    weighting: inverse_vol
-    rebalance_hours: 12
-    max_positions: 4
-    # LONG из верхних 1 - 0.80 = 20% ранга, SHORT из нижних 20%. На универсуме
-    # из 9 символов это 2 long + 2 short за тик, то есть ровно max_positions=4.
+    zscore_window_bars: 168     # W: 168 баров при 1h = 168 ч = 7 сут
+    signal_lookback: "4h"       # h: 4 бара при 1h
+    # Выбирается на шаге 3 правилом 6.3 документа решения; до выбора стоит
+    # первая проверяемая точка сетки K = {3.0, 2.5, 2.0}.
+    entry_threshold: 3.0
+    exit_threshold: null        # выхода по |z| нет — только time-stop
+    max_holding_bars: 4         # баров при 1h = 4 ч
+    weighting: equal
+    rebalance_hours: 1          # решение на каждом баре
+    max_positions: 4            # не читается стратегией; равно portfolio.risk.max_positions
+    # LONG из верхних 1 - 0.80 = 20% ранга, SHORT из нижних 20%: на вселенной
+    # цикла из 8 символов ceil(0.2 * 8) = 2 кандидата на сторону за тик.
     long_percentile: 0.80
     short_percentile: 0.20
-    entry_execution: post_only
-    exit_execution: post_only
-    min_expected_edge_bps: 10
-    seed: 42
+    entry_execution: market     # модели заполнения post-only нет -> пессимистичные издержки
+    exit_execution: market
+    min_expected_edge_bps: 0    # фильтр — расстояние до уровня выхода по |z|, которого нет
+    seed: 42                    # ветка MR в pipeline/factory.py поле не передаёт
 
-  # Риск-лимиты из снимка v4. ЭТОТ блок поведение меняет: до сих пор
-  # действовали дефолты схемы (max_positions=5, max_position_weight=0.5,
-  # max_leverage=10.0, maintenance_margin_buffer_pct=0.1), и измеренный пик
-  # одновременных позиций на train упирался в 5, а не в зарегистрированные 4.
+  # Риск-лимиты портфельного слоя. Отличаются от дефолтов схемы
+  # (max_positions=5, max_position_weight=0.5, max_leverage=10.0,
+  # maintenance_margin_buffer_pct=0.1). max_position_weight обязан быть 1.0:
+  # веса нормируются по выбранной книге, одиночная позиция получает 1.0, а
+  # _apply_max_position_weight такие интенты отвергает, а не урезает.
   risk:
     max_positions: 4
     max_position_weight: 1.0
@@ -132,18 +135,17 @@ portfolio:
     max_leverage: 5.0
     maintenance_margin_buffer_pct: 0.05
 
-# Режимный гейтинг. В снимке v4 этот блок ошибочно вложен под portfolio:, тогда
-# как regime — поле верхнего уровня Settings, и PortfolioConfig со
-# extra="forbid" такую вложенность отвергает: снимок нельзя было вставить
-# дословно. Ключи обязаны быть в форме exposure_<режим> — этого требует
-# RegimeConfig._regime_sanity, и по ней же теперь ищет потребитель.
+# Режимный гейтинг цикла 2 — нейтральный (документ решения, п. 4.4): все
+# множители 1.0. Без блока fusion и так дал бы 1.0, но значения выписаны явно,
+# чтобы отсутствие блока нельзя было принять за забытый. regime — поле верхнего
+# уровня Settings; ключи в форме exposure_<режим> требует RegimeConfig._regime_sanity.
 regime:
   strategy_overrides:
     mean_reversion_v0:
-      exposure_trend_low_vol: 0.25
-      exposure_trend_high_vol: 0.0
+      exposure_trend_low_vol: 1.0
+      exposure_trend_high_vol: 1.0
       exposure_range_low_vol: 1.0
-      exposure_range_high_vol: 0.5
+      exposure_range_high_vol: 1.0
 
 storage:
   db_path: data/crypto_bot.db

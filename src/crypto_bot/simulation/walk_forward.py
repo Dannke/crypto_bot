@@ -25,7 +25,7 @@ import asyncio
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import overload
+from typing import Literal, overload
 
 from ..config.env import Config
 from ..config.schemas import RegimeConfig
@@ -43,6 +43,21 @@ from ..storage.db import Database
 from .historical_source import HistoricalCandleSource
 
 logger = get_logger(__name__)
+
+
+def pin_candles(
+    candles: list[Candle], start_ms: int | None = None, end_ms: int | None = None,
+) -> list[Candle]:
+    """Bars whose OPEN time lies in ``[start_ms, end_ms)``; None leaves that side open.
+
+    Pinning the window makes the split a function of the registration, not of
+    how much history the database happens to hold on the day of the run.
+    """
+    return [
+        c for c in candles
+        if (start_ms is None or c.timestamp >= start_ms)
+        and (end_ms is None or c.timestamp < end_ms)
+    ]
 
 
 @dataclass(slots=True)
@@ -104,13 +119,13 @@ class WalkForwardResult:
 @overload
 def calendar_split(
     candles: list[Candle], period_ms: int, ratio: float,
-    three_way: bool = False, validation_ratio: float = 0.2
+    three_way: Literal[False] = False, validation_ratio: float = 0.2
 ) -> tuple[int, int, int, int]: ...
 
 @overload
 def calendar_split(
     candles: list[Candle], period_ms: int, ratio: float,
-    three_way: bool = True, validation_ratio: float = 0.2
+    three_way: Literal[True], validation_ratio: float = 0.2
 ) -> tuple[int, int, int, int, int, int]: ...
 
 def calendar_split(
@@ -243,6 +258,9 @@ def run_walk_forward(
     # 3-way split options
     three_way: bool = False,
     validation_ratio: float = 0.2,
+    # Pinned data window: first symbol's bars with open time in [start_ms, end_ms)
+    start_ms: int | None = None,
+    end_ms: int | None = None,
 ) -> WalkForwardResult:
     """Run walk-forward analysis on calendar windows (2-way or 3-way split).
 
@@ -263,6 +281,9 @@ def run_walk_forward(
         maintenance_margin_buffer_pct: Maintenance margin buffer (fraction).
         three_way: If True, use 3-way split (train/validation/test).
         validation_ratio: Validation fraction when three_way=True.
+        start_ms: Pin the split to bars opening at or after this time (None = first bar).
+        end_ms: Pin the split to bars opening before this time (None = last bar).
+                History before start_ms stays in ``source`` for warmup.
 
     Returns:
         WalkForwardResult with train/validation/test summaries and overfit hint.
@@ -274,20 +295,27 @@ def run_walk_forward(
 
     # Use first symbol's candles to determine calendar windows
     first_symbol = symbols[0]
-    candles = source.slice_between(0, 2**63 - 1, first_symbol, timeframe)
+    candles = pin_candles(
+        source.slice_between(0, 2**63 - 1, first_symbol, timeframe), start_ms, end_ms,
+    )
     if not candles:
-        raise ValueError(f"No candles found for {first_symbol} {timeframe}")
+        raise ValueError(
+            f"No candles found for {first_symbol} {timeframe} "
+            f"in the window [{start_ms}, {end_ms})"
+        )
 
     period_ms = 3600000 if timeframe == "1h" else (900000 if timeframe == "15m" else 14400000)
 
+    val_start: int | None
+    val_end: int | None
     if three_way:
         train_start, train_end, val_start, val_end, test_start, test_end = calendar_split(
             candles, period_ms, split_ratio, three_way=True, validation_ratio=validation_ratio
         )
     else:
-        result = calendar_split(candles, period_ms, split_ratio)
-        assert len(result) == 4, "Expected 4-tuple for 2-way split"
-        train_start, train_end, test_start, test_end = result  # type: ignore[assignment]
+        train_start, train_end, test_start, test_end = calendar_split(
+            candles, period_ms, split_ratio
+        )
         val_start = val_end = None
 
     # Count bars in each window

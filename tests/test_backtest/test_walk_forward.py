@@ -16,12 +16,13 @@ from crypto_bot.core.enums import StrategyType
 from crypto_bot.pipeline.factory import PER_TF_STRATEGY_NAME
 from crypto_bot.simulation.historical_source import HistoricalCandleSource
 from crypto_bot.simulation.pnl import PnLSummary
-from crypto_bot.strategy.portfolio_strategies import MOMENTUM_V0_STRATEGY_NAME
 from crypto_bot.simulation.walk_forward import (
     WalkForwardResult,
     calendar_split,
+    pin_candles,
     run_walk_forward,
 )
+from crypto_bot.strategy.portfolio_strategies import MOMENTUM_V0_STRATEGY_NAME
 
 from .test_baseline_comparison import (
     BASE_TS,
@@ -77,6 +78,39 @@ class TestCalendarSplit:
             expected = ratio * N_BARS * PERIOD_MS
             # within one bar of the exact ratio point
             assert abs(train_ms - expected) <= PERIOD_MS
+
+
+class TestPinnedWindow:
+    """--start/--end: the split follows the registration, not the DB contents."""
+
+    def test_pin_candles_keeps_bars_opening_inside_the_window(self) -> None:
+        start = BASE_TS + 10 * PERIOD_MS
+        end = BASE_TS + 50 * PERIOD_MS
+        pinned = pin_candles(_code_candles(), start, end)
+        assert [c.timestamp for c in pinned] == [
+            BASE_TS + i * PERIOD_MS for i in range(10, 50)
+        ]
+        assert pin_candles(_code_candles()) == _code_candles()
+
+    def test_run_walk_forward_splits_only_the_pinned_window(self) -> None:
+        """Bars outside the window stay in the source (warmup) but not in the split."""
+        start = BASE_TS + 24 * PERIOD_MS
+        end = BASE_TS + (N_BARS - 24) * PERIOD_MS
+        result = run_walk_forward(
+            _csm_config(),
+            symbols=SYMBOLS,
+            timeframe="1h",
+            source=_source(),
+            split_ratio=0.7,
+            start_ms=start,
+            end_ms=end,
+        )
+        expected = calendar_split(pin_candles(_code_candles(), start, end), PERIOD_MS, 0.7)
+        assert (
+            result.train_start_ms, result.train_end_ms, result.test_start_ms, result.test_end_ms
+        ) == expected
+        assert result.train_start_ms == start
+        assert result.test_end_ms == end
 
 
 class TestWalkForwardCandidate:

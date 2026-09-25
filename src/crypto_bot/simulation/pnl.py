@@ -6,6 +6,7 @@ gains/losses, win rate, and performance metrics.
 from __future__ import annotations
 
 import math
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
 from typing import TYPE_CHECKING
@@ -14,6 +15,63 @@ from ..core.enums import Side
 
 if TYPE_CHECKING:
     from .paper_position import PaperPosition
+
+
+def equity_returns(equities: Sequence[float]) -> list[float]:
+    """Simple returns between consecutive equity records."""
+    return [(equities[i] - equities[i - 1]) / equities[i - 1] for i in range(1, len(equities))]
+
+
+def sharpe_from_returns(returns: Sequence[float]) -> float:
+    """Sharpe as ``PnLSummary.sharpe_ratio`` defines it, before rounding.
+
+    mean / std (ddof=1) of the per-record equity returns times sqrt(365);
+    returns with |r| >= 0.5 are dropped as outliers; 0.0 with fewer than two
+    returns left or zero variance.
+
+    Units: sqrt(365) is the daily factor, while the backtester records equity
+    every tick — hourly at 1h — so the value is not an annualized Sharpe ratio
+    but roughly the annualized one divided by sqrt(24). The sign is unaffected.
+    """
+    kept = [r for r in returns if abs(r) < 0.5]
+    if len(kept) < 2:
+        return 0.0
+    mean_ret = sum(kept) / len(kept)
+    var_ret = sum((r - mean_ret) ** 2 for r in kept) / (len(kept) - 1)
+    if var_ret <= 0:
+        return 0.0
+    return (mean_ret / math.sqrt(var_ret)) * math.sqrt(365)
+
+
+def subwindow_sharpes(
+    equity_points: Sequence[tuple[int, float]],
+    start_ms: int,
+    end_ms: int,
+    *,
+    n_windows: int = 3,
+    period_ms: int = 3_600_000,
+) -> list[float]:
+    """Sharpe of each of ``n_windows`` consecutive equal calendar parts of a window.
+
+    ``equity_points`` are ``(tick_ms, equity)`` sorted by time.  Inner
+    boundaries are ``start + j * (end - start) / n`` floored to ``period_ms``
+    from ``start``; the last part is closed on the right, since the backtester's
+    clock includes the window end.  The return between two consecutive ticks
+    belongs to the part holding the later tick, so the parts partition the
+    returns of the whole window.
+    """
+    if n_windows < 1 or end_ms <= start_ms:
+        raise ValueError("need n_windows >= 1 and end_ms > start_ms")
+    span = end_ms - start_ms
+    bounds = [start_ms + (span * j // n_windows) // period_ms * period_ms for j in range(n_windows)]
+    bounds.append(end_ms)
+    buckets: list[list[float]] = [[] for _ in range(n_windows)]
+    for (_, prev_equity), (tick_ms, equity) in zip(equity_points, equity_points[1:], strict=False):
+        if not start_ms <= tick_ms <= end_ms:
+            continue
+        j = next(i for i in range(n_windows) if tick_ms < bounds[i + 1] or i == n_windows - 1)
+        buckets[j].append((equity - prev_equity) / prev_equity)
+    return [sharpe_from_returns(bucket) for bucket in buckets]
 
 
 @dataclass(frozen=True, slots=True)
@@ -131,19 +189,8 @@ class PnLTracker:
         # Calculate max profit
         max_profit_pct = (self.peak_equity - self.initial_equity) / self.initial_equity * 100.0
 
-        # Calculate Sharpe ratio from equity history returns
-        sharpe_ratio = 0.0
-        if len(self.equity_history) > 2:
-            equities = [e for _, e in self.equity_history]
-            returns = [(equities[i] - equities[i-1]) / equities[i-1]
-                       for i in range(1, len(equities))]
-            returns = [r for r in returns if abs(r) < 0.5]  # filter outliers
-            if len(returns) > 1:
-                mean_ret = sum(returns) / len(returns)
-                var_ret = sum((r - mean_ret) ** 2 for r in returns) / (len(returns) - 1)
-                if var_ret > 0:
-                    std_ret = math.sqrt(var_ret)
-                    sharpe_ratio = (mean_ret / std_ret) * math.sqrt(365)
+        # Sharpe from per-record equity returns; see sharpe_from_returns for units.
+        sharpe_ratio = sharpe_from_returns(equity_returns([e for _, e in self.equity_history]))
 
         return PnLSummary(
             total_trades=total_trades,

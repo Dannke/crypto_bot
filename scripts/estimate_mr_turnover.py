@@ -14,6 +14,17 @@ Methodology (documented, reproducible):
 - Annual cost drag = daily_cost_drag_bps / 10000 × 365  (crypto trades 24/7/365)
 - Break-even: gross return must exceed annual_cost_drag_pct
 
+Two optional limiters for a threshold-triggered strategy (MR cycle 2, decision
+document section 6.4); without them the output and the exit code are unchanged:
+
+- ``--entries-per-day``: the formula above assumes every slot is refilled as soon
+  as it frees up. A strategy that enters on a threshold cannot make more round
+  trips than it has entries, so round-trips/day <= min(capacity, entries/day).
+- ``--mean-entry-move-bps`` with ``--max-breakeven-fraction``: per-trade
+  breakeven. rho_req = round-trip cost / mean |move| at entry is the share of
+  the entry move that must revert, on average, for the trade to break even. When
+  given, this criterion decides the exit code.
+
 Usage:
     python scripts/estimate_mr_turnover.py --max-positions 3 --holding-hours 8 --rebalance-hours 24 --fee-bps 2 --slippage-bps 1
 """
@@ -123,19 +134,19 @@ def print_report(est: TurnoverEstimate) -> None:
     print(f"  Avg holding: {est.avg_holding_hours:.1f} hours")
     print(f"  Max round-trips/position/day: {min(24.0/est.avg_holding_hours, 24.0/est.rebalance_hours):.4f}")
     print()
-    print(f"  Cost assumptions:")
+    print("  Cost assumptions:")
     print(f"    Fee: {est.fee_per_side_bps:.1f} bps/side")
     print(f"    Slippage: {est.slippage_per_side_bps:.1f} bps/side")
     print(f"    Funding: {est.funding_bps_per_day:.1f} bps/day")
     print()
-    print(f"  Turnover:")
+    print("  Turnover:")
     print(f"    Round-trips/day: {est.round_trips_per_day:.2f}")
     print()
-    print(f"  Cost drag:")
+    print("  Cost drag:")
     print(f"    Daily: {est.daily_cost_drag_bps:.1f} bps")
     print(f"    Annual: {est.annual_cost_drag_pct:.2%}")
     print()
-    print(f"  Break-even:")
+    print("  Break-even:")
     print(f"    Required gross annual return: {est.required_gross_annual_return_pct:.2%}")
     print()
 
@@ -143,14 +154,14 @@ def print_report(est: TurnoverEstimate) -> None:
     print("  SANITY CHECK:")
     if est.annual_cost_drag_pct > 1.0:
         print(f"  FAIL: Annual cost drag > 100% ({est.annual_cost_drag_pct:.1%})")
-        print(f"       Strategy CANNOT be profitable after costs with these parameters.")
-        print(f"       Fix: increase holding period, reduce max_positions, or reduce cadence.")
+        print("       Strategy CANNOT be profitable after costs with these parameters.")
+        print("       Fix: increase holding period, reduce max_positions, or reduce cadence.")
     elif est.annual_cost_drag_pct > 0.5:
         print(f"  FAIL: Annual cost drag > 50% ({est.annual_cost_drag_pct:.1%})")
-        print(f"       Very high hurdle - needs exceptional gross edge.")
+        print("       Very high hurdle - needs exceptional gross edge.")
     elif est.annual_cost_drag_pct > 0.2:
         print(f"  WARN: Annual cost drag > 20% ({est.annual_cost_drag_pct:.1%})")
-        print(f"       High but potentially viable with strong edge.")
+        print("       High but potentially viable with strong edge.")
     else:
         print(f"  PASS: Cost drag manageable ({est.annual_cost_drag_pct:.1%} annually)")
 
@@ -168,8 +179,16 @@ def main():
     parser.add_argument("--fee-bps", type=float, required=True, help="Fee per side (bps)")
     parser.add_argument("--slippage-bps", type=float, required=True, help="Slippage per side (bps)")
     parser.add_argument("--funding-bps", type=float, default=0.0, help="Funding cost per day (bps)")
+    parser.add_argument("--entries-per-day", type=float, default=None,
+                        help="Signal-limited cap: entries per day (each round trip needs one)")
+    parser.add_argument("--mean-entry-move-bps", type=float, default=None,
+                        help="Mean |move| at entry, bps, for the per-trade breakeven")
+    parser.add_argument("--max-breakeven-fraction", type=float, default=None,
+                        help="PASS if round-trip cost / mean entry move <= this (required with --mean-entry-move-bps)")
 
     args = parser.parse_args()
+    if (args.mean_entry_move_bps is None) != (args.max_breakeven_fraction is None):
+        parser.error("--mean-entry-move-bps and --max-breakeven-fraction go together")
 
     est = estimate_turnover(
         max_positions=args.max_positions,
@@ -182,6 +201,28 @@ def main():
     )
 
     print_report(est)
+
+    round_trip_bps = 2.0 * (args.fee_bps + args.slippage_bps)
+    if args.entries_per_day is not None:
+        capped = min(est.round_trips_per_day, args.entries_per_day)
+        daily = capped * round_trip_bps + args.funding_bps
+        print("  SIGNAL-LIMITED BOUND:")
+        print(f"    Entries/day (signal): {args.entries_per_day:.2f}")
+        print(f"    Round-trips/day = min({est.round_trips_per_day:.2f}, {args.entries_per_day:.2f}) = {capped:.2f}")
+        print(f"    Daily: {daily:.1f} bps")
+        print(f"    Annual: {daily / 10000.0 * 365.0:.2%}")
+        print("=" * 70)
+
+    if args.mean_entry_move_bps is not None:
+        rho_req = round_trip_bps / args.mean_entry_move_bps
+        passed = rho_req <= args.max_breakeven_fraction
+        print("  PER-TRADE BREAKEVEN:")
+        print(f"    Round-trip cost: {round_trip_bps:.1f} bps")
+        print(f"    Mean |move| at entry: {args.mean_entry_move_bps:.1f} bps")
+        print(f"    rho_req = {round_trip_bps:.1f} / {args.mean_entry_move_bps:.1f} = {rho_req:.2%} of the entry move must revert")
+        print(f"    {'PASS' if passed else 'FAIL'}: rho_req {'<=' if passed else '>'} {args.max_breakeven_fraction:.0%}")
+        print("=" * 70)
+        return 0 if passed else 1
 
     # Exit with error code if cost drag is too high
     if est.annual_cost_drag_pct > 1.0:

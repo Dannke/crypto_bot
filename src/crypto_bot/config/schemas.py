@@ -7,7 +7,7 @@ kill-switch) is enforced by the settings loader / orchestrator, not here.
 """
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -261,15 +261,20 @@ class CsmConfig(StrictConfigModel):
 class MeanReversionConfig(StrictConfigModel):
     """Mean reversion (MR) strategy parameters.
 
-    Cross-sectional z-score of short-horizon returns on a rolling window.
-    Entry when |z| >= entry_threshold, exit on reversion (|z| <= exit_threshold)
-    or time-stop (max_holding_bars). Hourly rebalance cadence.
+    z-score of the signal_lookback log return, scaled by sqrt(h) times the RMS
+    of the zscore_window_bars one-bar log returns that precede the signal
+    window (see ``portfolio/mean_reversion_features.py``).
+    Entry when |z| >= entry_threshold; exit by time-stop (max_holding_bars)
+    and, unless exit_threshold is null, on |z| <= exit_threshold.
     """
     timeframe: str = "1h"
     zscore_window_bars: int = Field(default=48, ge=10)
     signal_lookback: str = "8h"
     entry_threshold: float = Field(default=2.0, gt=0.0)
-    exit_threshold: float = Field(default=0.5, ge=0.0)
+    # null = no |z|-based exit, positions leave by time-stop only. Explicit null
+    # rather than a value that "almost never" fires: |z| <= 0 does happen on a
+    # market whose price did not move over the signal horizon.
+    exit_threshold: Annotated[float, Field(ge=0.0)] | None = 0.5
     max_holding_bars: int = Field(default=48, ge=1)
     weighting: Literal["equal", "inverse_vol"] = "inverse_vol"
     rebalance_hours: int = Field(default=12, ge=1)
@@ -296,9 +301,14 @@ class MeanReversionConfig(StrictConfigModel):
                 f"mean_reversion.timeframe must be one of {policy.ALLOWED_TIMEFRAMES}, "
                 f"got {self.timeframe!r}"
             )
-        if self.entry_threshold <= self.exit_threshold:
+        if self.exit_threshold is not None and self.entry_threshold <= self.exit_threshold:
             raise ValueError(
                 "mean_reversion.entry_threshold must exceed exit_threshold"
+            )
+        if self.exit_threshold is None and self.min_expected_edge_bps > 0:
+            raise ValueError(
+                "mean_reversion.min_expected_edge_bps measures the distance to the "
+                "reversion exit level and requires exit_threshold; got exit_threshold=null"
             )
         tf_seconds = policy.timeframe_to_seconds(self.timeframe)
         try:

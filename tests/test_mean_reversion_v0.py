@@ -6,10 +6,13 @@ Regime, funding, OI, order book data are explicitly out of scope for v0.
 """
 from __future__ import annotations
 
+from datetime import UTC, datetime
+from math import exp, sqrt
+
 import pytest
 
 from crypto_bot.core.enums import Mode, Side, TradeStatus
-from crypto_bot.core.types import Candle
+from crypto_bot.core.types import Candle, Position
 from crypto_bot.pipeline.factory import build_strategy_registry
 from crypto_bot.portfolio import (
     MarketSnapshot,
@@ -20,7 +23,6 @@ from crypto_bot.portfolio import (
 from crypto_bot.simulation.historical_source import HistoricalCandleSource
 from crypto_bot.strategy import MeanReversionStrategy, StrategyContext
 from crypto_bot.strategy.portfolio_strategies import MEAN_REVERSION_V0_STRATEGY_NAME
-from datetime import datetime, UTC
 
 PERIOD_MS = 3_600_000
 BASE_TS = 1_700_000_000_000
@@ -45,42 +47,22 @@ def _mr_candles_from_closes(closes: list[float]) -> list[Candle]:
     return out
 
 
-def _compute_returns(closes: list[float]) -> list[float]:
-    """Compute 1-bar returns from closes."""
-    return [(closes[i] / closes[i-1]) - 1.0 for i in range(1, len(closes))]
+BASE_LOG_RETURN = 0.001  # |r_1| of every bar in the estimation window
 
 
 def _build_closes_for_zscore(target_z: float, window: int = WINDOW_BARS, signal_lb: int = SIGNAL_LOOKBACK) -> list[float]:
-    """Build a price series that yields approximately the target z-score.
+    """Build closes whose z-score is exactly ``target_z``.
 
-    We create a series with small random-ish returns for the rolling window,
-    then make the last `signal_lb` returns produce the desired z-score.
+    The estimation window is ``window`` one-bar log returns of +-0.001, so its
+    RMS is exactly 0.001 and s_h = sqrt(signal_lb) * 0.001; the last
+    ``signal_lb`` bars then move ln(P_t / P_{t-h}) = target_z * s_h.
     """
-    # Base returns: small noise around 0
-    base_returns = [0.001 * ((-1) ** i) for i in range(window)]
-    # This gives mean ~0, std ~0.001
-    
-    # Current return over signal_lb bars to achieve target_z
-    # z = (current_return - mean) / std
-    # current_return = z * std + mean
-    # For simplicity, approximate std of window returns
-    mean_r = sum(base_returns) / len(base_returns)
-    var = sum((r - mean_r) ** 2 for r in base_returns) / (len(base_returns) - 1)
-    std_r = var ** 0.5 if var > 0 else 0.001
-    
-    target_return = target_z * std_r + mean_r
-    
-    # Distribute target_return over signal_lb bars (geometric)
-    per_bar = (1 + target_return) ** (1 / signal_lb) - 1
-    
-    # Build full return series
-    returns = base_returns + [per_bar] * signal_lb
-    
-    # Convert to closes
+    base_returns = [BASE_LOG_RETURN * (-1) ** i for i in range(window)]
+    signal_total = target_z * sqrt(signal_lb) * BASE_LOG_RETURN
+    returns = base_returns + [signal_total / signal_lb] * signal_lb
     closes = [100.0]
     for r in returns:
-        closes.append(closes[-1] * (1 + r))
-    
+        closes.append(closes[-1] * exp(r))
     return closes
 
 
@@ -125,10 +107,9 @@ def _state(anchor_ms: int | None = None) -> PortfolioState:
     )
 
 
-def _make_position(symbol: str, side: Side, bars_ago: int, anchor_ms: int) -> object:
+def _make_position(symbol: str, side: Side, bars_ago: int, anchor_ms: int) -> Position:
     """Create a Position with opened_at `bars_ago` bars before anchor."""
     opened_at = datetime.fromtimestamp((anchor_ms - bars_ago * 3600 * 1000) / 1000, tz=UTC)
-    from crypto_bot.core.types import Position
     return Position(
         id=1,
         symbol=symbol,
@@ -190,15 +171,20 @@ _ZSCORES = {
 
 
 class TestZScoreSignal:
-    def test_zscore_ranking_ascending(self) -> None:
-        """Most negative z-score ranks first (LONG candidate)."""
+    def test_new_entries_ordered_by_abs_z_regardless_of_side(self) -> None:
+        """Strongest dislocation first, so a full book drops the weakest entry.
+
+        Ties on |z| are broken by symbol name, for a deterministic order.
+        """
         strategy = _mr_strategy(top_fraction=1.0, short_fraction=1.0)
         intent = strategy.evaluate_market(_zscore_snapshot(_ZSCORES), _state())
 
-        # Should rank by z-score ascending: SYM0 (-3.0) first, SYM6 (3.0) last
-        symbols = [i.symbol for i in intent.intents]
-        assert symbols[0] == "SYM0/USDT"  # Most oversold
-        assert symbols[-1] == "SYM6/USDT"  # Most overbought
+        assert [(i.symbol, i.side) for i in intent.intents] == [
+            ("SYM0/USDT", Side.LONG),   # |z| = 3.0
+            ("SYM6/USDT", Side.SHORT),  # |z| = 3.0
+            ("SYM1/USDT", Side.LONG),   # |z| = 2.5
+            ("SYM5/USDT", Side.SHORT),  # |z| = 2.5
+        ]
 
     def test_long_entry_below_negative_threshold(self) -> None:
         """Symbols with z <= -entry_threshold enter LONG."""
@@ -212,6 +198,9 @@ class TestZScoreSignal:
         assert "SYM0/USDT" in long_symbols
         assert "SYM1/USDT" in long_symbols
         assert "SYM2/USDT" not in long_symbols  # -1.0 > -2.0
+        # Long-only means long-only: ranked[-0:] used to be the whole ranking,
+        # which turned SYM5 and SYM6 into shorts.
+        assert all(i.side == Side.LONG for i in intent.intents)
 
     def test_short_entry_above_positive_threshold(self) -> None:
         """Symbols with z >= entry_threshold enter SHORT."""
@@ -294,6 +283,99 @@ class TestExitLogic:
         assert intent.intents[0].symbol == "SYM0/USDT"
         assert intent.intents[0].side == Side.LONG
 
+    def test_null_exit_threshold_holds_a_quiet_position_until_time_stop(self) -> None:
+        """exit_threshold=None: a small |z| is not an exit; age is."""
+        snapshot = _zscore_snapshot({"SYM0/USDT": -0.3})
+        anchor = snapshot.as_of_ms
+        strategy = _mr_strategy(exit_threshold=None, max_holding_bars=10)
+
+        def state_with_age(bars_ago: int) -> PortfolioState:
+            return PortfolioState(
+                as_of_ms=anchor,
+                mode=Mode.PAPER,
+                equity=10_000.0,
+                cash=5_000.0,
+                positions=(_make_position("SYM0/USDT", Side.LONG, bars_ago, anchor),),
+            )
+
+        kept = strategy.evaluate_market(snapshot, state_with_age(9))
+        assert [(i.symbol, i.side) for i in kept.intents] == [("SYM0/USDT", Side.LONG)]
+        assert kept.closes == ()
+
+        closed = strategy.evaluate_market(snapshot, state_with_age(10))
+        assert closed.intents == ()
+        assert closed.closes == (("SYM0/USDT", "1h", "time_stop"),)
+
+    def test_time_stop_applies_to_a_symbol_without_zscore(self) -> None:
+        """A held symbol too short of history for a z-score still ages out.
+
+        It used to be kept "conservatively" before the time-stop was checked,
+        which meant such a position could never be closed by the strategy.
+        """
+        source = HistoricalCandleSource()
+        closes = _build_closes_for_zscore(1.0)
+        source.load_all("SYM0/USDT", "1h", _mr_candles_from_closes(closes))
+        n_bars = len(closes)
+        source.load_all("SYMX/USDT", "1h", [
+            Candle(timestamp=BASE_TS + i * PERIOD_MS, open=50.0, high=50.05,
+                   low=49.95, close=50.0, volume=1000.0)
+            for i in range(n_bars - 5, n_bars)
+        ])
+        anchor = BASE_TS + n_bars * PERIOD_MS
+        universe = get_universe_snapshot(source, ["SYM0/USDT", "SYMX/USDT"], "1h", anchor)
+        snapshot = get_market_snapshot(source, universe, "1h")
+        assert "SYMX/USDT" in snapshot.candles_by_symbol
+
+        strategy = _mr_strategy(exit_threshold=None, max_holding_bars=10)
+        state = PortfolioState(
+            as_of_ms=anchor,
+            mode=Mode.PAPER,
+            equity=10_000.0,
+            cash=5_000.0,
+            positions=(_make_position("SYMX/USDT", Side.LONG, 10, anchor),),
+        )
+        intent = strategy.evaluate_market(snapshot, state)
+
+        assert intent.closes == (("SYMX/USDT", "1h", "time_stop"),)
+        assert intent.intents == ()
+
+
+class TestBookPriority:
+    def test_new_entries_do_not_evict_a_held_position(self) -> None:
+        """Truncation to max_positions drops the weakest new entry, never an incumbent.
+
+        With the old order (all longs, then all shorts) the two new longs
+        filled the book and the held short was cut, i.e. closed as "rebalance".
+        """
+        from crypto_bot.portfolio.risk import PortfolioRiskEngine, PortfolioRiskLimits
+
+        snapshot = _zscore_snapshot(_ZSCORES)
+        anchor = snapshot.as_of_ms
+        state = PortfolioState(
+            as_of_ms=anchor,
+            mode=Mode.PAPER,
+            equity=10_000.0,
+            cash=5_000.0,
+            # SYM4 has z = 1.0 now: above the 0.5 reversion exit, so it is held.
+            positions=(_make_position("SYM4/USDT", Side.SHORT, 1, anchor),),
+        )
+        intent = _mr_strategy(top_fraction=1.0, short_fraction=1.0).evaluate_market(
+            snapshot, state
+        )
+        engine = PortfolioRiskEngine(PortfolioRiskLimits(
+            max_positions=2,
+            max_position_weight=1.0,
+            max_gross_exposure=1.0,
+            max_net_exposure=1.0,
+            enable_correlation_filter=False,
+        ))
+        report = engine.evaluate(intent, state)
+
+        assert [(i.symbol, i.side) for i in report.adjusted_intent.intents] == [
+            ("SYM4/USDT", Side.SHORT),
+            ("SYM0/USDT", Side.LONG),
+        ]
+
 
 class TestWeighting:
     def test_equal_weighting(self) -> None:
@@ -339,6 +421,10 @@ class TestContract:
             _mr_strategy(top_fraction=1.5)
         with pytest.raises(ValueError):
             _mr_strategy(short_fraction="yes")
+        # The edge filter is a distance to the reversion exit level.
+        with pytest.raises(ValueError, match="requires exit_threshold"):
+            _mr_strategy(exit_threshold=None, min_expected_edge_bps=10)
+        assert _mr_strategy(exit_threshold=None).exit_threshold is None
 
     def test_evaluate_rejects_features_input(self) -> None:
         from crypto_bot.core.types import FeatureSet
@@ -372,8 +458,8 @@ class TestContract:
             _mr_strategy().evaluate(features, _state())
 
     def test_registered_as_portfolio_strategy(self) -> None:
-        from crypto_bot.strategy.base import PortfolioStrategy
         from crypto_bot.core.enums import StrategyType
+        from crypto_bot.strategy.base import PortfolioStrategy
 
         registry = build_strategy_registry()
         assert registry.get_type(MEAN_REVERSION_V0_STRATEGY_NAME) == StrategyType.PORTFOLIO
@@ -397,40 +483,42 @@ class TestContract:
 
 class TestShortHistoryExclusion:
     def test_insufficient_history_excluded(self) -> None:
-        """Symbols with fewer than window + signal + 1 bars are excluded."""
+        """Symbols with fewer than window + signal + 1 bars are excluded.
+
+        Both symbols carry the same z = -3 move; only the history differs.
+        """
         source = HistoricalCandleSource()
-        # SYM_A: enough bars (25 bars)
-        closes_a = [100.0] * 25
-        for i in range(1, 25):
-            closes_a[i] = closes_a[i-1] * 1.001
+        n_bars = 25
+        move = _build_closes_for_zscore(-3.0)  # W + h + 1 = 15 closes
+        closes_a = [move[0]] * (n_bars - len(move)) + move
         source.load_all("SYM_A/USDT", "1h", _mr_candles_from_closes(closes_a))
-        
-        # SYM_B: too few bars (only 10)
-        closes_b = [100.0] * 10
-        source.load_all("SYM_B/USDT", "1h", _mr_candles_from_closes(closes_b))
-        
-        anchor = BASE_TS + 24 * PERIOD_MS
+        # SYM_B: the last 10 closes of the same move, aligned to the same anchor.
+        source.load_all("SYM_B/USDT", "1h", [
+            Candle(timestamp=BASE_TS + (n_bars - 10 + i) * PERIOD_MS, open=c,
+                   high=c * 1.001, low=c * 0.999, close=c, volume=1000.0)
+            for i, c in enumerate(move[-10:])
+        ])
+
+        anchor = BASE_TS + n_bars * PERIOD_MS
         universe = get_universe_snapshot(source, ["SYM_A/USDT", "SYM_B/USDT"], "1h", anchor)
         snapshot = get_market_snapshot(source, universe, "1h")
+        assert "SYM_B/USDT" in snapshot.candles_by_symbol  # present, just short
 
         intent = _mr_strategy(top_fraction=1.0, short_fraction=1.0).evaluate_market(
             snapshot, _state(anchor)
         )
 
-        # Only SYM_A should be considered
-        symbols = [i.symbol for i in intent.intents]
-        assert "SYM_A/USDT" in symbols
-        assert "SYM_B/USDT" not in symbols
+        assert [(i.symbol, i.side) for i in intent.intents] == [("SYM_A/USDT", Side.LONG)]
 
 
 class TestMinExpectedEdgeBpsDimensional:
     """Test that min_expected_edge_bps filter is dimensionally correct.
-    
-    The filter uses: expected_edge_bps = (|z| - exit_threshold) * rolling_std * 10000
-    where rolling_std is in return units (e.g., 0.008 = 0.8%).
-    
+
+    The filter uses: expected_edge_bps = (|z| - exit_threshold) * sigma_horizon * 10000
+    where sigma_horizon is the std estimate of the signal-horizon log return.
+
     This test verifies the filter doesn't systematically favor cheap coins over
-    expensive ones when z-score and rolling_std are identical.
+    expensive ones when z-score and sigma_horizon are identical.
     """
     def test_edge_filter_not_biased_by_price(self) -> None:
         """Filter should not favor DOGE ($0.08) over BTC ($60,000) when z and rolling_std match."""

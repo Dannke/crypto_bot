@@ -76,6 +76,14 @@ def main() -> None:
         help="Keep train/validation/test backtest DBs under this directory for inspection",
     )
     parser.add_argument(
+        "--start", default=None, metavar="YYYY-MM-DD",
+        help="Pin the split: first symbol's bars opening at or after this UTC date",
+    )
+    parser.add_argument(
+        "--end", default=None, metavar="YYYY-MM-DD",
+        help="Pin the split: first symbol's bars opening before this UTC date (exclusive)",
+    )
+    parser.add_argument(
         "--override", action="append", default=[],
         help="Settings override, e.g. --override scoring__min_score=50. Can be repeated.",
     )
@@ -105,6 +113,16 @@ def main() -> None:
             parser.error("--validation-split must be between 0 and 1 (exclusive)")
         if not args.split + args.validation_split < 1:
             parser.error("--split + --validation-split must be < 1")
+
+    def utc_date_ms(value: str | None) -> int | None:
+        if value is None:
+            return None
+        day = datetime.strptime(value, "%Y-%m-%d").replace(tzinfo=UTC)
+        return int(day.timestamp() * 1000)
+
+    start_ms, end_ms = utc_date_ms(args.start), utc_date_ms(args.end)
+    if start_ms is not None and end_ms is not None and start_ms >= end_ms:
+        parser.error("--start must be earlier than --end")
 
     # Default universe: symbols from market_constants
     symbols = args.symbols or list(MARKET_QUOTE_VOLUME.keys())
@@ -173,14 +191,18 @@ def main() -> None:
         maintenance_margin_buffer_pct=args.maintenance_margin_buffer,
         three_way=args.three_way,
         validation_ratio=args.validation_split,
+        start_ms=start_ms,
+        end_ms=end_ms,
     )
 
     def tf(ts: int) -> str:
         return datetime.fromtimestamp(ts / 1000, tz=UTC).strftime("%Y-%m-%d %H:%M")
 
+    print(f"  Pinned window: start={args.start or 'first bar'} end={args.end or 'last bar'} (UTC, end exclusive)")
     print(f"  Mode: {result.strategy_mode.value}  Strategy: {result.strategy_name}")
     print(f"  Train window: {tf(result.train_start_ms)} -> {tf(result.train_end_ms)} ({result.train_n_bars} bars)")
     if result.split_type == "3-way":
+        assert result.validation_start_ms is not None and result.validation_end_ms is not None
         print(f"  Validation window: {tf(result.validation_start_ms)} -> {tf(result.validation_end_ms)} ({result.validation_n_bars} bars)")
     print(f"  Test window:  {tf(result.test_start_ms)} -> {tf(result.test_end_ms)} ({result.test_n_bars} bars)")
     result.print()
