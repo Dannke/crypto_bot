@@ -105,8 +105,8 @@ portfolio:
     timeframe: 1h
     zscore_window_bars: 168     # W: 168 баров при 1h = 168 ч = 7 сут
     signal_lookback: "4h"       # h: 4 бара при 1h
-    # Выбирается на шаге 3 правилом 6.3 документа решения; до выбора стоит
-    # первая проверяемая точка сетки K = {3.0, 2.5, 2.0}.
+    # k* = 3.0 выбран правилом 6.3 документа решения: N_proj(3.0) = 394.4 >= 300
+    # (docs/research/mr_cycle2_preregistration.md, раздел 4).
     entry_threshold: 3.0
     exit_threshold: null        # выхода по |z| нет — только time-stop
     max_holding_bars: 4         # баров при 1h = 4 ч
