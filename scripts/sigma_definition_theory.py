@@ -32,18 +32,24 @@ import datetime as dt
 import math
 
 import numpy as np
+import numpy.typing as npt
 
 from crypto_bot.core.types import Candle
 from crypto_bot.simulation.walk_forward import calendar_split
+
+FloatArray = npt.NDArray[np.float64]
 
 SEED = 20260925
 N_HOURS = 300_000          # длина каждого синтетического ряда, часов
 SIGMA_1H = 0.005           # масштаб часовой лог-доходности (z от него не зависит)
 KS = (2.0, 2.5, 3.0)
 
-# Закреплённое окно данных нового цикла и доли 3-way сплита.
+# Закреплённое окно данных нового цикла, вселенная и доли 3-way сплита.
+# Поправка 1 (до измерения): AVAX/USDT исключён — у бэктестера нет его
+# спецификации, окно — общее покрытие оставшихся 8 символов.
 WINDOW_START = dt.datetime(2024, 1, 1, tzinfo=dt.UTC)
-WINDOW_END = dt.datetime(2026, 8, 7, tzinfo=dt.UTC)
+WINDOW_END = dt.datetime(2026, 9, 17, tzinfo=dt.UTC)
+N_SYMBOLS = 8
 TRAIN_FRACTION = 0.5
 VALIDATION_FRACTION = 0.2
 
@@ -137,17 +143,17 @@ def section_effective_n() -> None:
 # --------------------------------------------------------------------------- #
 # Раздел 3: Монте-Карло
 # --------------------------------------------------------------------------- #
-def _gaussian(rng: np.random.Generator) -> np.ndarray:
+def _gaussian(rng: np.random.Generator) -> FloatArray:
     return rng.standard_normal(N_HOURS) * SIGMA_1H
 
 
-def _student(rng: np.random.Generator, nu: float = 5.0) -> np.ndarray:
+def _student(rng: np.random.Generator, nu: float = 5.0) -> FloatArray:
     draws = rng.standard_t(nu, N_HOURS)
     return draws / math.sqrt(nu / (nu - 2.0)) * SIGMA_1H
 
 
 def _garch(rng: np.random.Generator, alpha: float = 0.05, beta: float = 0.94,
-           nu: float = 5.0) -> np.ndarray:
+           nu: float = 5.0) -> FloatArray:
     """GARCH(1,1) с t-инновациями, безусловная дисперсия = SIGMA_1H^2.
 
     Параметры иллюстративные (типичный порядок для внутридневных данных),
@@ -164,7 +170,7 @@ def _garch(rng: np.random.Generator, alpha: float = 0.05, beta: float = 0.94,
     return out
 
 
-def _rolling_sum(x: np.ndarray, w: int) -> np.ndarray:
+def _rolling_sum(x: FloatArray, w: int) -> FloatArray:
     """s[j] = sum(x[j-w+1 .. j]); nan, если окно неполное или содержит nan."""
     missing = np.isnan(x)
     c = np.concatenate(([0.0], np.cumsum(np.where(missing, 0.0, x))))
@@ -176,7 +182,7 @@ def _rolling_sum(x: np.ndarray, w: int) -> np.ndarray:
     return out
 
 
-def _lag(x: np.ndarray, k: int) -> np.ndarray:
+def _lag(x: FloatArray, k: int) -> FloatArray:
     out = np.full(x.shape, np.nan)
     if k == 0:
         return x.copy()
@@ -184,7 +190,7 @@ def _lag(x: np.ndarray, k: int) -> np.ndarray:
     return out
 
 
-def _rolling_median_abs(x: np.ndarray, w: int, chunk: int = 20_000) -> np.ndarray:
+def _rolling_median_abs(x: FloatArray, w: int, chunk: int = 20_000) -> FloatArray:
     """median(|x[j-w+1 .. j]|), по частям, чтобы не держать N*w в памяти."""
     a = np.abs(x)
     out = np.full(x.shape, np.nan)
@@ -195,9 +201,9 @@ def _rolling_median_abs(x: np.ndarray, w: int, chunk: int = 20_000) -> np.ndarra
     return out
 
 
-def definitions(r: np.ndarray) -> dict[str, np.ndarray]:
+def definitions(r: FloatArray) -> dict[str, FloatArray]:
     """z_t для каждого определения; индекс t — последний закрытый бар."""
-    out: dict[str, np.ndarray] = {}
+    out: dict[str, FloatArray] = {}
 
     # (a) как в коде v1–v4: простые доходности, h=8, W=48; mean/std (ddof=1)
     # однобарных доходностей, окно включает бары текущего движения.
@@ -221,15 +227,17 @@ def definitions(r: np.ndarray) -> dict[str, np.ndarray]:
     h = 4
     rh = _rolling_sum(r, h)
 
-    def sqrt_h_rms(window: int, *, disjoint: bool = True, demean: bool = False) -> np.ndarray:
+    def sqrt_h_rms(window: int, *, disjoint: bool = True, demean: bool = False) -> FloatArray:
         lag = h if disjoint else 0
         s_1 = _lag(_rolling_sum(r, window), lag)
         s_2 = _lag(_rolling_sum(r * r, window), lag)
         if demean:
             mean = s_1 / window
             var = (s_2 - window * mean ** 2) / (window - 1)
-            return (rh - h * mean) / np.sqrt(h * var)
-        return rh / np.sqrt(h * s_2 / window)
+            z: FloatArray = (rh - h * mean) / np.sqrt(h * var)
+            return z
+        z = rh / np.sqrt(h * s_2 / window)
+        return z
 
     out["ВЫБРАНО: 4ч / (sqrt(4)*RMS 1ч), W=168, до окна"] = sqrt_h_rms(168)
     out["то же, W=48"] = sqrt_h_rms(48)
@@ -332,10 +340,9 @@ def section_gate_bounds(chosen_onsets: dict[float, float], test_hours: int) -> N
     p_norm = normal_two_sided(2.0)
     print(f"G3: P(|z|>=2) в [0.75, 1.50] x {p_norm:.2%} = "
           f"[{0.75 * p_norm:.2%}, {1.50 * p_norm:.2%}]")
-    n_symbols = 9
-    symbol_hours = test_hours * n_symbols
+    symbol_hours = test_hours * N_SYMBOLS
     print("Осуществимость (гауссов ноль, ВЫБРАНО): ожидаемые сырые «начала» на test =")
-    print(f"доля начал x {test_hours} ч x {n_symbols} символов = доля x {symbol_hours}")
+    print(f"доля начал x {test_hours} ч x {N_SYMBOLS} символов = доля x {symbol_hours}")
     for k, rate in chosen_onsets.items():
         print(f"  k={k}: {rate:.3%} x {symbol_hours} = {rate * symbol_hours:.0f}")
 
