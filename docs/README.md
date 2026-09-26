@@ -12,17 +12,22 @@
 
 Для задачи по конкретной стратегии достаточно её папки в `research/`.
 
-## Текущее состояние — 2026-09-26
+## Текущее состояние — 2026-09-27
 
 | стратегия | вердикт | документ |
 |---|---|---|
 | CSM, cross-sectional momentum | **REJECTED** — Test Sharpe −0.63 на 874 сделках | [`research/csm/closure.md`](research/csm/closure.md) |
 | Mean reversion, цикл 1 (регистрации v1–v4) | **INVALIDATED** — дефект статистики сигнала, гипотеза не тестировалась | [`research/mean-reversion/cycle-1/closure.md`](research/mean-reversion/cycle-1/closure.md) |
 | Mean reversion, цикл 2 | **REJECTED** — Sharpe(test) −0.1858, Sharpe(validation) −0.2337 | [`research/mean-reversion/cycle-2/4-closure.md`](research/mean-reversion/cycle-2/4-closure.md) |
+| Funding carry, цикл 1 — межсекционный carry по фандингу | **ОТЛОЖЕН** — Task 0 записан до измерений; развилка Р1 решена в пользу cash-and-carry | [`research/funding-carry/cycle-1/1-hypothesis-and-decision-rule.md`](research/funding-carry/cycle-1/1-hypothesis-and-decision-rule.md) |
+| Funding/basis, цикл 1 — cash-and-carry на BTC и ETH | **В РАБОТЕ** — Task 0': гипотеза, decision rule и гейты зафиксированы до измерений; модель капитала К1 | [`research/funding-basis/cycle-1/1-hypothesis-and-decision-rule.md`](research/funding-basis/cycle-1/1-hypothesis-and-decision-rule.md) |
 
-Test-сегмент 2025-11-24..2026-09-17 для mean reversion израсходован. Следующее направление не
-выбрано; варианты — в [`research/mean-reversion/plan.md`](research/mean-reversion/plan.md),
-раздел 9: funding/basis (приоритет №4) или regime-aware (№1).
+Test-сегмент 2025-11-24..2026-09-17 для mean reversion израсходован. Следующее направление —
+funding/basis, приоритет №4 из [`research/mean-reversion/plan.md`](research/mean-reversion/plan.md),
+раздел 9: cash-and-carry на BTC и ETH с моделью капитала К1 (решение владельца 2026-09-27), план
+шага — [`research/funding-basis/plan.md`](research/funding-basis/plan.md). До первого измерения
+нужно исправить учёт фандинга в бэктесте — F0–F5 в разделе 0.2 документа межсекционного carry —
+и загрузить данные.
 
 ## Структура
 
@@ -34,7 +39,14 @@ docs/
 │   └── backlog.md                     ← открытые пункты
 └── research/
     ├── csm/
-    │   └── closure.md
+    │   └── closure.md                 ← вердикт, поправка 1
+    ├── funding-basis/
+    │   ├── plan.md                    ← план шага cash-and-carry: задачи, риски, DoD
+    │   └── cycle-1/
+    │       └── 1-hypothesis-and-decision-rule.md ← Task 0': гипотеза, decision rule, гейты — до измерений
+    ├── funding-carry/
+    │   └── cycle-1/
+    │       └── 1-hypothesis-and-decision-rule.md ← Task 0 межсекционного carry, отложен; F0–F5, D1, E1–E3
     └── mean-reversion/
         ├── plan.md                    ← план шага MR: задачи, шаблон decision rule, риски
         ├── cycle-1/
@@ -64,7 +76,11 @@ docs/
   промежуточные статусы, handoff'ы между сессиями. Долговечное из них переносится в регистрацию,
   итог цикла или бэклог. История остаётся в git.
 - **Ссылки проверяются тестом** `tests/test_docs_links.py`: полные пути `docs/...` во всём
-  репозитории, относительные markdown-ссылки внутри `docs/` и `@`-импорты CLAUDE.md.
+  репозитории, относительные markdown-ссылки внутри `docs/`, их якоря и `@`-импорты CLAUDE.md.
+- **Ссылка на раздел — с якорем:** `[раздел 0.2](файл.md#якорь)`. Якорь — как у GitHub:
+  заголовок строчными, без знаков препинания, пробелы — дефисы (`0.2 А — б` → `02-а--б`). Тест
+  проверяет, что такой заголовок есть в целевом файле. Ссылка без якоря подтверждает только, что
+  файл существует: если путь займёт другой документ, она молча укажет на него (перенос 2026-09-27).
 - **`@`-импорт в CLAUDE.md** — всё от `@` до первого пробела, поэтому импорт стоит последним в
   строке: точка или запятая сразу после пути становятся частью имени, и Claude Code молча не
   загружает файл.
@@ -94,3 +110,11 @@ docs/
 
 Упоминаются в старых документах, но в репозитории не было никогда: `tasks_summary.md`,
 `handoff_csm_to_mean_reversion.md`, `method-and-working-style.md`, `plan_stage2.md`.
+
+## Перенос 2026-09-27 — путь переиспользуется
+
+`research/funding-basis/cycle-1/1-hypothesis-and-decision-rule.md` — Task 0 межсекционного carry
+(`b4913e4`) — перенесён в `research/funding-carry/cycle-1/`: вариант отложен, а его прежний путь
+займёт документ решения cash-and-carry. Ссылки на этот путь в коммитах до переноса означают
+документ carry: `git show f8dc7ad:docs/research/funding-basis/cycle-1/1-hypothesis-and-decision-rule.md`.
+Ссылки в текущих документах переведены на новый путь в коммите переноса.
