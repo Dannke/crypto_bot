@@ -19,10 +19,12 @@
 | CSM, cross-sectional momentum | **REJECTED** — Test Sharpe −0.63 на 874 сделках | [`research/csm/closure.md`](research/csm/closure.md) |
 | Mean reversion, цикл 1 (регистрации v1–v4) | **INVALIDATED** — дефект статистики сигнала, гипотеза не тестировалась | [`research/mean-reversion/cycle-1/closure.md`](research/mean-reversion/cycle-1/closure.md) |
 | Mean reversion, цикл 2 | **REJECTED** — Sharpe(test) −0.1858, Sharpe(validation) −0.2337 | [`research/mean-reversion/cycle-2/4-closure.md`](research/mean-reversion/cycle-2/4-closure.md) |
+| Funding/basis, цикл 1 — межсекционный carry по фандингу | **В РАБОТЕ** — Task 0: гипотеза, decision rule и сетка зафиксированы до измерений | [`research/funding-basis/cycle-1/1-hypothesis-and-decision-rule.md`](research/funding-basis/cycle-1/1-hypothesis-and-decision-rule.md) |
 
-Test-сегмент 2025-11-24..2026-09-17 для mean reversion израсходован. Следующее направление не
-выбрано; варианты — в [`research/mean-reversion/plan.md`](research/mean-reversion/plan.md),
-раздел 9: funding/basis (приоритет №4) или regime-aware (№1).
+Test-сегмент 2025-11-24..2026-09-17 для mean reversion израсходован. Следующее направление —
+funding/basis, приоритет №4 из [`research/mean-reversion/plan.md`](research/mean-reversion/plan.md),
+раздел 9. Цикл 1 проверяет carry по фандингу на одних перпетуалах. До первого измерения нужно
+исправить учёт фандинга в бэктесте и загрузить перп-данные (документ Task 0, раздел 8).
 
 ## Структура
 
@@ -35,6 +37,9 @@ docs/
 └── research/
     ├── csm/
     │   └── closure.md
+    ├── funding-basis/
+    │   └── cycle-1/
+    │       └── 1-hypothesis-and-decision-rule.md ← гипотеза, decision rule, сетка — до измерений
     └── mean-reversion/
         ├── plan.md                    ← план шага MR: задачи, шаблон decision rule, риски
         ├── cycle-1/
