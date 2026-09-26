@@ -104,3 +104,20 @@
     Источник — D1 в
     [разделе 0.2](../research/funding-carry/cycle-1/1-hypothesis-and-decision-rule.md#02-не-переиспользуется-без-изменений--вопреки-брифу)
     документа `funding-carry/cycle-1/1-hypothesis-and-decision-rule.md`.
+
+11. **Допуск инструмента в бэктесте не знает даты листинга.** Кэш спецификаций хранит текущий
+    список Bybit без `launchTime` (`data/instruments.py`), и бэктест допускает инструмент на любую
+    дату истории, если он торгуется сегодня. Цикл 2 MR держал POL/USDT во вселенной с 2024-01-01
+    ([раздел 5](../research/mean-reversion/cycle-2/1-signal-definition.md#5-данные-и-сплит-нового-цикла)
+    `cycle-2/1-signal-definition.md`), а перпетуал POLUSDT запущен 2024-09-05 08:30 UTC
+    ([поправка 1](../research/csm/closure.md#поправка-1-2026-09-26-846-funding-events--не-измерение)
+    к итогу CSM, команда 2): до этой даты на train позиции открывались в несуществующем
+    инструменте по спотовым ценам. Вердикт цикла 2 это не затрагивает: validation и test начинаются
+    после запуска. Исправление — допуск `launchTime ≤ t` (план funding/basis, Task 3).
+
+12. **SL/TP отключаются по имени стратегии.** `PortfolioExecutor` выключает ценовые стопы только
+    для `mean_reversion_v0` (`simulation/portfolio_executor.py:92`); любая другая портфельная
+    стратегия получает ATR-стопы, даже если её гипотеза их не предполагает. Исправление — атрибут
+    рынка или группы ног, а не имя стратегии (план funding/basis, Task 5). Источник — E1 в
+    [разделе 0.2](../research/funding-carry/cycle-1/1-hypothesis-and-decision-rule.md#02-не-переиспользуется-без-изменений--вопреки-брифу)
+    документа `funding-carry/cycle-1/1-hypothesis-and-decision-rule.md`.
