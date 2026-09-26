@@ -157,7 +157,8 @@ momentum на смежном участке кривой, просто с обр
 
 Это самый важный раздел плана — и единственный, ради которого стоило писать
 `handoff_csm_to_mean_reversion.md` целиком. Фиксируется **до** первой строки кода
-Task 1, в отдельном файле `docs/research/mean_reversion_preregistration.md`,
+Task 1, в отдельном файле (v1; удалён при реструктуризации документации —
+`git show 6e88fe8:docs/research/mean_reversion_preregistration.md`),
 с датой/временем создания как аудиторским следом.
 
 ### Шаблон формулировки (заполняется точными числами до старта, не после)
@@ -281,7 +282,7 @@ A) реализуется без изменений в DTO. Если нет — 
 ### Task 0 — Pre-registration (документ, не код) · S
 **Что:** зафиксировать гипотезу, decision rule, параметрическую сетку, минимальный
 порог сделок — до первой строки кода.
-**Файлы:** `docs/research/mean_reversion_preregistration.md`.
+**Файлы:** v1 регистрации (удалён — `git show 6e88fe8:docs/research/mean_reversion_preregistration.md`).
 **DoD:** файл существует, датирован, содержит буквальную decision rule без плейсхолдеров.
 
 ### Task 1 — MeanReversionConfig + валидаторы · S/M

@@ -325,7 +325,7 @@ python scripts/estimate_mr_turnover.py --max-positions 4 --holding-hours 4 --reb
 Снимок конфига сверяется механически:
 
 ```bash
-python scripts/check_config_snapshot.py docs/research/mr_cycle2_preregistration.md --strict-unregistered
+python scripts/check_config_snapshot.py docs/research/mean-reversion/cycle-2/3-preregistration.md --strict-unregistered
 ```
 
 Все 8 символов по-прежнему исполнимы для бэктестера (кэш спецификаций живёт 24 ч и
@@ -422,7 +422,7 @@ python scripts/mr_decision_rule.py --label production --validation-db data/backt
 Кандидат — коммит `21186ba`; оба аудита — 2026-09-26, файлы аудиторами не менялись.
 
 **`preregistration-guardian` — все пункты PASS, «можно замораживать».** Шаг 0:
-`python scripts/check_config_snapshot.py docs/research/mr_cycle2_preregistration.md` и тот же
+`python scripts/check_config_snapshot.py docs/research/mean-reversion/cycle-2/3-preregistration.md` и тот же
 вызов с `--strict-unregistered` — `MISMATCH: 0 из 65`, `UNREGISTERED: 0`, `ВЕРДИКТ: PASS`, код
 возврата 0. Проверено отдельно и подтверждено: применение правила 6.3 совпадает с его текстом в
 решении буквально, а значение `entry_threshold` коммитом кандидата не менялось — только

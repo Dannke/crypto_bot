@@ -3,7 +3,7 @@
 Unit and wiring checks cannot see a dimension error inside a statistic: the
 v1-v4 feature divided an 8h return by the std of 1h returns, both "in
 percent", and survived four pre-registrations (MR closure). These tests pin the
-definition of docs/research/mr_cycle2_signal_definition.md, section 1, and
+definition of docs/research/mean-reversion/cycle-2/1-signal-definition.md, section 1, and
 check its null distribution directly on the real function.
 """
 from __future__ import annotations

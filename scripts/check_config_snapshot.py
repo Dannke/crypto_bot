@@ -19,7 +19,7 @@
 
 Пример:
     python scripts/check_config_snapshot.py \
-        docs/research/mean_reversion_preregistration_v4.md
+        docs/research/mean-reversion/cycle-2/3-preregistration.md
 """
 from __future__ import annotations
 

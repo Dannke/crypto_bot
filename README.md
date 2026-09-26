@@ -100,11 +100,11 @@ The project has been completely restructured from a **single-timeframe signal bo
 - **Rebalance**: Hourly (configurable via `csm.rebalance_hours`)
 
 ### Mean Reversion (`mean_reversion_v0`)
-- **Signal**: Cross-sectional z-score of short-horizon returns (rolling window)
-- **Entry**: LONG when z ≤ -entry_threshold, SHORT when z ≥ entry_threshold
-- **Exit**: Reversion (|z| ≤ exit_threshold) OR time-stop (max_holding_bars)
-- **Weighting**: Equal or inverse-volatility (24h rolling std of returns)
-- **Rebalance**: Hourly (configurable)
+- **Signal**: horizon-consistent z of the `signal_lookback` log return, scaled by `sqrt(h)` times the RMS of the `zscore_window_bars` one-bar log returns that precede the signal window
+- **Entry**: LONG when z ≤ -entry_threshold, SHORT when z ≥ entry_threshold, at most the top/bottom percentile of the cross-sectional rank per tick
+- **Exit**: time-stop (`max_holding_bars`); reversion exit on |z| ≤ `exit_threshold` only if it is not `null`
+- **Weighting**: equal, or inverse-volatility (24h rolling std of returns)
+- **Status**: research verdict REJECTED (cycle 2) — see [`docs/README.md`](docs/README.md)
 
 ### Null Baselines
 - `random_baseline`: Uniform random long/short selection (seeded for reproducibility)
@@ -210,13 +210,7 @@ portfolio:
     long_percentile: 0.90
     short_percentile: 0.10
     rebalance_hours: 24
-  mean_reversion:
-    timeframe: 1h
-    zscore_window_bars: 48
-    entry_threshold: 2.0
-    exit_threshold: 0.5
-    max_holding_bars: 24
-    weighting: inverse_vol
+  # mean_reversion: current values live in config/settings.yaml; the research snapshot is in its pre-registration
 
 regime:
   enabled: true
@@ -337,20 +331,12 @@ tests/
 
 ---
 
-## Research Documentation
+## Documentation
 
-```
-docs/
-├── architecture/
-│   ├── CSM_closure_final_summary.md
-│   ├── R0_R8_implementation_summary.md
-│   └── audit.md
-└── research/
-    ├── MR_implementation_status.md
-    ├── mean_reversion_preregistration.md
-    ├── mean_reversion_preregistration_v2.md
-    └── mean_reversion_preregistration_v3.md
-```
+Start at [`docs/README.md`](docs/README.md): current state, reading order, structure and
+conventions. Architecture — [`docs/architecture/overview.md`](docs/architecture/overview.md),
+open items — [`docs/architecture/backlog.md`](docs/architecture/backlog.md), research verdicts
+— [`docs/research/`](docs/research/).
 
 ---
 

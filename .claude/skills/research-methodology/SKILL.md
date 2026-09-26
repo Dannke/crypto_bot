@@ -11,7 +11,7 @@ description: Use whenever working on strategy research for this project — writ
 
 ## Pre-registration — обязателен до первой строки кода
 - Гипотеза, decision rule и параметрическая сетка фиксируются в датированном документе
-  (`docs/research/<strategy>_preregistration.md`) **до** запуска первого теста на test-сегменте.
+  (`docs/research/<strategy>/cycle-<N>/3-preregistration.md`, соглашения — `docs/README.md`) **до** запуска первого теста на test-сегменте.
 - Decision rule — буквальная конъюнкция условий (например: Test Sharpe > 0 при production DD, AND
   Validation Sharpe > 0, AND n_trades(test) ≥ порог, AND согласованность знака в k из m под-окон).
   Никаких "примерно" или мест под заполнение — числа фиксированы.
@@ -97,7 +97,7 @@ pre-registration и несколько раундов аудита.
 `|z| >= 2.0` медиана истинного отклонения — 1.31σ, и лишь 21.7% срабатываний оказываются
 настоящими двухсигмовыми событиями.
 
-Важно, где именно был пропуск. Исходный план (`docs/research/mean_reversion_plan.md`)
+Важно, где именно был пропуск. Исходный план (`docs/research/mean-reversion/plan.md`)
 формулу **не задавал**: Task 2 говорит «вычисление rolling mean/std и z-score по символу»,
 раздел «Вариант A» — «z-score короткой доходности относительно собственного rolling mean/std
 по символу за N баров». По каким доходностям берутся mean/std, не сказано нигде. То есть

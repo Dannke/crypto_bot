@@ -98,7 +98,7 @@ risk:
 portfolio:
   strategy_name: mean_reversion_v0
 
-  # Сетка цикла 2: docs/research/mr_cycle2_signal_definition.md, разделы 1 и 4.
+  # Сетка цикла 2: docs/research/mean-reversion/cycle-2/1-signal-definition.md, разделы 1 и 4.
   # Все значения выписаны явно, даже совпадающие с дефолтами схемы: дефолты
   # MeanReversionConfig до сих пор несут сетку v4.
   mean_reversion:
@@ -106,7 +106,7 @@ portfolio:
     zscore_window_bars: 168     # W: 168 баров при 1h = 168 ч = 7 сут
     signal_lookback: "4h"       # h: 4 бара при 1h
     # k* = 3.0 выбран правилом 6.3 документа решения: N_proj(3.0) = 394.4 >= 300
-    # (docs/research/mr_cycle2_preregistration.md, раздел 4).
+    # (docs/research/mean-reversion/cycle-2/3-preregistration.md, раздел 4).
     entry_threshold: 3.0
     exit_threshold: null        # выхода по |z| нет — только time-stop
     max_holding_bars: 4         # баров при 1h = 4 ч
