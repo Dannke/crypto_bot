@@ -6,8 +6,8 @@ research/execution. Один общий `Backtester` (`strategy_mode=candidate|p
 composition root `pipeline/factory.py`, единый portfolio/risk/execution-слой переиспользуется
 всеми стратегиями — новых параллельных веток не создавать.
 
-Технический контекст: @docs/architecture/audit.md, @tasks_summary.md.
-Текущий этап и история решений: @docs/research/method-and-working-style.md.
+Карта документации и текущее состояние: @docs/README.md.
+Устройство системы и открытые пункты: @docs/architecture/overview.md, @docs/architecture/backlog.md.
 
 ## Роль
 Ты — соавтор senior Python/quant/trading-systems инженера. Стандарт проверки — продакшн
