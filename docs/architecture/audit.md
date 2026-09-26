@@ -277,6 +277,21 @@ portfolio:
    исправления в paper/live позиции по MR не откроются вовсе, что и
    маскирует отсутствие закрытия.
 
+5. **Состав вселенной в бэктесте зависит от живого ответа API** (не блокирует;
+   обнаружено 2026-09-26). `PortfolioExecutor.open_position` молча отвергает
+   символ без спецификации инструмента (fail-closed), а спецификации берутся из
+   кэша `data/cache/bybit_instruments.json` с TTL 24 ч, при промахе — из
+   текущего списка Bybit. За одни сутки список изменился с 874 до 885
+   спецификаций: AVAXUSDT во вчерашнем отсутствовал, в сегодняшнем есть. Одна и
+   та же команда в разные дни может прогнать разную эффективную вселенную. Не
+   специфично для MR — касается любой стратегии на этой вселенной. Команды и
+   вывод: `docs/research/mr_cycle2_signal_definition.md`, поправка 2.
+
+6. **`mean_reversion.max_positions` декоративен** (не блокирует). Поле не
+   читается в `MeanReversionStrategy.evaluate_market`; книгу ограничивает
+   `portfolio.risk.max_positions`. Зафиксировано `xfail(strict=True)` в
+   `tests/test_mean_reversion_fields_wired.py`.
+
 ---
 
 ## 9. Key Files Reference

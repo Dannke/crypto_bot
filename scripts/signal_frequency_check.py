@@ -256,12 +256,12 @@ def run_signal_frequency_check(
             long_candidates = [
                 sym for sym in long_candidates
                 if abs(zs.zscores.get(sym, 0.0)) - exit_threshold > 0
-                and (abs(zs.zscores.get(sym, 0.0)) - exit_threshold) * zs.rolling_stds.get(sym, 0.0) * 10000.0 >= min_expected_edge_bps
+                and (abs(zs.zscores.get(sym, 0.0)) - exit_threshold) * zs.sigma_horizon.get(sym, 0.0) * 10000.0 >= min_expected_edge_bps
             ]
             short_candidates = [
                 sym for sym in short_candidates
                 if abs(zs.zscores.get(sym, 0.0)) - exit_threshold > 0
-                and (abs(zs.zscores.get(sym, 0.0)) - exit_threshold) * zs.rolling_stds.get(sym, 0.0) * 10000.0 >= min_expected_edge_bps
+                and (abs(zs.zscores.get(sym, 0.0)) - exit_threshold) * zs.sigma_horizon.get(sym, 0.0) * 10000.0 >= min_expected_edge_bps
             ]
         
         # Fill available slots up to max_positions

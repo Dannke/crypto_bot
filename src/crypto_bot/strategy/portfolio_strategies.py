@@ -195,7 +195,7 @@ class CrossSectionalMomentumStrategy(PortfolioStrategy):
         if (lookback_bars is None) == (lookbacks_bars is None) and lookback_bars is None:
             # Registry/manager construction without lookback arguments:
             # fall back to the v0 default of a single 20-bar horizon.
-            self._lookbacks_bars = (20,)
+            self._lookbacks_bars: tuple[int, ...] = (20,)
         elif lookback_bars is not None and lookbacks_bars is not None:
             raise ValueError(
                 "provide only one of lookback_bars (single horizon) or "
@@ -412,21 +412,27 @@ class MeanReversionStrategy(PortfolioStrategy):
     """Cross-sectional mean reversion v0: z-score -> rank -> threshold -> weights.
 
     Signal pipeline:
-    1. **z-score** — per-symbol z-score of short-horizon return (signal_lookback)
-       relative to rolling mean/std over zscore_window_bars (computed via
-       ``compute_zscore_snapshot`` with same-anchor guarantees).
+    1. **z-score** — per-symbol z of the signal_lookback log return, horizon-
+       consistent (``compute_zscore_snapshot``, same-anchor guarantees).
     2. **rank** — symbols sorted by z-score ascending (most negative = oversold = LONG
        candidate, most positive = overbought = SHORT candidate).
     3. **threshold filter** — enter LONG when z <= -entry_threshold, SHORT when
-       z >= entry_threshold.  Exit (reversion) when |z| <= exit_threshold.
-    4. **time-stop** — positions held longer than max_holding_bars are closed
-       regardless of z-score (uses PortfolioState.positions[].opened_at).
+       z >= entry_threshold.  Exit (reversion) when |z| <= exit_threshold, unless
+       exit_threshold is None: then positions leave by time-stop only.
+    4. **time-stop** — positions held max_holding_bars or longer are closed
+       regardless of z-score, and also when the symbol has no z-score this tick
+       (uses PortfolioState.positions[].opened_at).
     5. **weighting** — equal or inverse_vol (24h vol estimate).
 
     The strategy is stateful across evaluations: it reads ``PortfolioState.positions``
     to enforce exit logic (reversion + time-stop) and only emits new intents for
     entries.  Existing positions that meet exit criteria are omitted from the
     returned intent (which signals closure to the executor).
+
+    Intent order matters: ``PortfolioRiskEngine`` truncates to max_positions in
+    intent order.  Incumbents therefore come first, then new candidates by |z|
+    descending regardless of side, so a full book rejects the weakest new
+    candidates instead of evicting a held position.
 
     v0 scope: single timeframe, cross-sectional z-score, fixed thresholds,
     hourly rebalance cadence.  Regime, funding, OI, order book — out of scope.
@@ -440,7 +446,7 @@ class MeanReversionStrategy(PortfolioStrategy):
         zscore_window_bars: int = 48,
         signal_lookback_bars: int = 8,
         entry_threshold: float = 3.0,
-        exit_threshold: float = 0.5,
+        exit_threshold: float | None = 0.5,
         max_holding_bars: int = 48,
         weighting: str = "inverse_vol",
         rebalance_hours: int = 24,
@@ -457,10 +463,11 @@ class MeanReversionStrategy(PortfolioStrategy):
             raise ValueError("signal_lookback_bars must be a positive integer")
         if not isinstance(entry_threshold, (int, float)) or entry_threshold <= 0:
             raise ValueError("entry_threshold must be positive")
-        if not isinstance(exit_threshold, (int, float)) or exit_threshold < 0:
-            raise ValueError("exit_threshold must be non-negative")
-        if entry_threshold <= exit_threshold:
-            raise ValueError("entry_threshold must exceed exit_threshold")
+        if exit_threshold is not None:
+            if not isinstance(exit_threshold, (int, float)) or exit_threshold < 0:
+                raise ValueError("exit_threshold must be non-negative or None")
+            if entry_threshold <= exit_threshold:
+                raise ValueError("entry_threshold must exceed exit_threshold")
         if not isinstance(max_holding_bars, int) or max_holding_bars < 1:
             raise ValueError("max_holding_bars must be a positive integer")
         if weighting not in ("equal", "inverse_vol"):
@@ -475,6 +482,11 @@ class MeanReversionStrategy(PortfolioStrategy):
             raise ValueError("exit_execution must be 'market' or 'post_only'")
         if not isinstance(min_expected_edge_bps, int) or min_expected_edge_bps < 0:
             raise ValueError("min_expected_edge_bps must be a non-negative integer")
+        if exit_threshold is None and min_expected_edge_bps > 0:
+            raise ValueError(
+                "min_expected_edge_bps measures the distance to the reversion exit "
+                "level and requires exit_threshold"
+            )
         if not isinstance(top_fraction, (int, float)) or isinstance(top_fraction, bool) or not 0.0 < top_fraction <= 1.0:
             raise ValueError("top_fraction must be in (0, 1]")
         if short_fraction is not None and (isinstance(short_fraction, bool) or not isinstance(short_fraction, (int, float)) or not 0.0 < short_fraction <= 1.0):
@@ -483,7 +495,7 @@ class MeanReversionStrategy(PortfolioStrategy):
         self._zscore_window_bars = zscore_window_bars
         self._signal_lookback_bars = signal_lookback_bars
         self._entry_threshold = float(entry_threshold)
-        self._exit_threshold = float(exit_threshold)
+        self._exit_threshold = float(exit_threshold) if exit_threshold is not None else None
         self._max_holding_bars = max_holding_bars
         self._weighting = weighting
         self._rebalance_hours = rebalance_hours
@@ -507,7 +519,7 @@ class MeanReversionStrategy(PortfolioStrategy):
         return self._entry_threshold
 
     @property
-    def exit_threshold(self) -> float:
+    def exit_threshold(self) -> float | None:
         return self._exit_threshold
 
     @property
@@ -582,39 +594,56 @@ class MeanReversionStrategy(PortfolioStrategy):
         self,
         candidates: list[str],
         zscore_snapshot: ZScoreSnapshot,
-        snapshot: MarketSnapshot,
-        side: Side,
     ) -> list[str]:
         """Filter candidates by minimum expected edge in bps.
 
-        Expected edge = (abs(z) - exit_threshold) * rolling_std * 10000
-        
-        rolling_std is the standard deviation of 1-bar returns (dimensionless, e.g., 0.008 = 0.8%).
-        z_distance is dimensionless. The product gives expected return in return units.
-        Multiply by 10000 to convert to bps.
+        Expected edge = (abs(z) - exit_threshold) * sigma_horizon * 10000
+
+        sigma_horizon is the std estimate of the signal-horizon log return, the
+        same scale z is measured in, so the product is the log-return distance
+        from the current move to the reversion exit level.  Only meaningful with
+        a reversion exit; the constructor rejects min_expected_edge_bps > 0
+        without exit_threshold.
         """
         if not candidates:
             return candidates
+        exit_threshold = self._exit_threshold
+        if exit_threshold is None:
+            raise ValueError("min_expected_edge_bps requires exit_threshold")
 
         filtered = []
         for symbol in candidates:
-            z = zscore_snapshot.zscores.get(symbol, 0.0)
-            rolling_std = zscore_snapshot.rolling_stds.get(symbol, 0.0)
-            if rolling_std <= 0:
-                continue
-
-            # Distance from exit threshold in z-score units
-            z_distance = abs(z) - self._exit_threshold
+            z = zscore_snapshot.zscores[symbol]
+            sigma = zscore_snapshot.sigma_horizon[symbol]
+            z_distance = abs(z) - exit_threshold
             if z_distance <= 0:
                 continue
-
-            # Expected edge in bps (rolling_std is in return units, e.g., 0.008 = 0.8%)
-            expected_edge_bps = z_distance * rolling_std * 10000.0
-
-            if expected_edge_bps >= self._min_expected_edge_bps:
+            if z_distance * sigma * 10000.0 >= self._min_expected_edge_bps:
                 filtered.append(symbol)
-
         return filtered
+
+    def _exit_reason(
+        self,
+        state: PortfolioState,
+        symbol: str,
+        timeframe: str,
+        zscore: float | None,
+    ) -> str | None:
+        """Why a held position leaves the book this tick, or None to keep it.
+
+        The time-stop does not depend on the z-score: a symbol that has no
+        z-score this tick (short history, flat window) still ages out.
+        """
+        if (
+            self._exit_threshold is not None
+            and zscore is not None
+            and abs(zscore) <= self._exit_threshold
+        ):
+            return "reversion"
+        age_bars = self._get_position_age_bars(state, symbol, timeframe)
+        if age_bars is not None and age_bars >= self._max_holding_bars:
+            return "time_stop"
+        return None
 
     def evaluate_market(
         self,
@@ -645,88 +674,62 @@ class MeanReversionStrategy(PortfolioStrategy):
         n_long = ceil(self._top_fraction * n_symbols)
         n_short = ceil(self._short_fraction * n_symbols) if self._short_fraction else 0
 
-        # Determine entry candidates
+        # Determine entry candidates. The short slice is written with an
+        # explicit start: ranked[-0:] would be the whole ranking, not nothing.
         long_candidates = [
             symbol for symbol, z in ranked[:n_long]
             if z <= -self._entry_threshold
         ]
         short_candidates = [
-            symbol for symbol, z in ranked[-n_short:]
+            symbol for symbol, z in ranked[n_symbols - n_short:]
             if z >= self._entry_threshold
         ]
 
-        # Apply min_expected_edge_bps filter
         if self._min_expected_edge_bps > 0:
-            # Estimate expected edge for each candidate
-            # Edge = (abs(z) - exit_threshold) * rolling_std / price * 10000 bps
-            long_candidates = self._filter_by_min_edge(
-                long_candidates, zscore_snapshot, snapshot, Side.LONG
-            )
-            short_candidates = self._filter_by_min_edge(
-                short_candidates, zscore_snapshot, snapshot, Side.SHORT
-            )
+            long_candidates = self._filter_by_min_edge(long_candidates, zscore_snapshot)
+            short_candidates = self._filter_by_min_edge(short_candidates, zscore_snapshot)
 
-        # Determine which existing positions to keep (not exited)
-        # Exit conditions: |z| <= exit_threshold (reversion) OR age >= max_holding_bars (time-stop)
-        keep_long: list[str] = []
-        keep_short: list[str] = []
-        # Track symbols that were explicitly exited (to prevent re-entry on same bar)
+        # Held positions: keep, or close with the strategy's own reason.
+        incumbents: list[tuple[str, Side]] = []
+        # Symbols closed this tick cannot re-enter on the same tick.
         exited_symbols: set[str] = set()
-
         for position in state.positions:
-            symbol = position.symbol
-            if symbol not in zscore_snapshot.zscores:
-                # No signal data — keep (conservative)
-                if position.side == Side.LONG:
-                    keep_long.append(symbol)
-                else:
-                    keep_short.append(symbol)
-                continue
-
-            z = zscore_snapshot.zscores[symbol]
-            age_bars = self._get_position_age_bars(state, symbol, snapshot.timeframe)
-
-            # Check exit conditions
-            exited = False
-            exit_reason = ""
-            if abs(z) <= self._exit_threshold:
-                exited = True
-                exit_reason = "reversion"
-            elif age_bars is not None and age_bars >= self._max_holding_bars:
-                exited = True
-                exit_reason = "time_stop"
-
-            if not exited:
-                if position.side == Side.LONG:
-                    keep_long.append(symbol)
-                else:
-                    keep_short.append(symbol)
+            reason = self._exit_reason(
+                state,
+                position.symbol,
+                snapshot.timeframe,
+                zscore_snapshot.zscores.get(position.symbol),
+            )
+            if reason is None:
+                incumbents.append((position.symbol, position.side))
             else:
-                exited_symbols.add(symbol)
-                closes.append((symbol, snapshot.timeframe, exit_reason))
-
-        # Exclude exited symbols from new entry candidates (prevent immediate re-entry)
-        long_candidates = [s for s in long_candidates if s not in exited_symbols]
-        short_candidates = [s for s in short_candidates if s not in exited_symbols]
+                exited_symbols.add(position.symbol)
+                closes.append((position.symbol, snapshot.timeframe, reason))
 
         # Инкумбент побеждает: символ, уже удерживаемый на одной стороне,
         # исключается из кандидатов противоположной.
         # Коллизия возникает штатно, а не в краевом случае: вошли в LONG при
         # z=-3.2, цена перелетела зону выхода [-0.5, +0.5] целиком и оказалась
         # на z=+3.5 -> реверсия не сработала (|z| > exit_threshold), символ
-        # остаётся в keep_long и одновременно проходит в short_candidates.
+        # остаётся удерживаемым и одновременно проходит в short_candidates.
         # Без этого фильтра он попадает в selected дважды, PortfolioIntent
         # падает на проверке уникальности, и весь тик проглатывается широким
         # except в бэктестере — вместе с легитимными закрытиями.
-        held = set(keep_long) | set(keep_short)
-        long_candidates = [s for s in long_candidates if s not in held]
-        short_candidates = [s for s in short_candidates if s not in held]
+        held = {symbol for symbol, _ in incumbents}
+        new_entries = [
+            (symbol, side)
+            for candidates, side in ((long_candidates, Side.LONG), (short_candidates, Side.SHORT))
+            for symbol in candidates
+            if symbol not in exited_symbols and symbol not in held
+        ]
+        # Инкумбенты впереди, новые — по |z| по убыванию, независимо от стороны.
+        # PortfolioRiskEngine режет книгу до max_positions по порядку интентов:
+        # при прежнем порядке (все лонги, потом все шорты) новые лонги
+        # вытесняли уже удерживаемый шорт, и он закрывался как "rebalance".
+        new_entries.sort(key=lambda entry: (-abs(zscore_snapshot.zscores[entry[0]]), entry[0]))
+        selected = incumbents + new_entries
 
-        # Combine: keep existing non-exited + new entries (avoid duplicates)
-        final_long = list(dict.fromkeys(keep_long + long_candidates))
-        final_short = list(dict.fromkeys(keep_short + short_candidates))
-
-        if not final_long and not final_short:
+        if not selected:
             return PortfolioIntent(
                 as_of_ms=snapshot.as_of_ms,
                 intents=(),
@@ -738,28 +741,32 @@ class MeanReversionStrategy(PortfolioStrategy):
                 strategy_name=MEAN_REVERSION_V0_STRATEGY_NAME,
             )
 
-        # Compute weights
-        selected = final_long + final_short
+        symbols = [symbol for symbol, _ in selected]
         if self._weighting == "inverse_vol":
-            weights = _inverse_vol_weights(snapshot, selected)
+            weights = _inverse_vol_weights(snapshot, symbols)
         else:
-            weight = 1.0 / len(selected)
-            weights = {s: weight for s in selected}
+            weight = 1.0 / len(symbols)
+            weights = {s: weight for s in symbols}
 
-        last_close = {
-            symbol: bars[-1].close
-            for symbol, bars in snapshot.candles_by_symbol.items()
+        # A held symbol may have no bars at this anchor; its entry price is the
+        # only reference left.
+        reference_price = {
+            position.symbol: position.entry_price for position in state.positions
         }
+        reference_price.update(
+            (symbol, bars[-1].close)
+            for symbol, bars in snapshot.candles_by_symbol.items()
+        )
 
         intents = tuple(
             PositionIntent(
                 symbol=symbol,
-                side=Side.SHORT if symbol in final_short else Side.LONG,
+                side=side,
                 target_weight=weights[symbol],
                 timeframe=snapshot.timeframe,
-                reference_price=last_close[symbol],
+                reference_price=reference_price[symbol],
             )
-            for symbol in selected
+            for symbol, side in selected
         )
 
         return PortfolioIntent(
