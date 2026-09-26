@@ -20,7 +20,7 @@
 
 2. **Фандинг: данных нет, и учёт не доходит до эквити.**
    - Данные: в `funding_rates` — только 2024-01-01 00:00 … 2024-02-01 00:00, восемь символов по
-     94 события, у POL/USDT ни одного (приложение A документа Task 0 funding/basis). PnL любого
+     94 события, у POL/USDT ни одного (приложение A документа Task 0 межсекционного carry). PnL любого
      бэктеста после февраля 2024 — до фандинга.
    - Учёт, установлено чтением кода: в портфельном бэктесте фандинг не попадает в таблицу
      `equity` при любых данных. Walk-forward читает `funding_rates` из свежей БД окна — событий
@@ -29,10 +29,10 @@
      как доля эквити × цена, не в USDT (F4); `funding_payments` копит дубли (F5). Поэтому все
      walk-forward прогоны шли без фандинга, в том числе на январе 2024.
    - Перед решением о реальном капитале нужна валидация модели фандинга на пересекающихся данных
-     (план MR, Task 9). Учёт и данные — Task 1 и 2 цикла 1 funding/basis.
+     (план MR, Task 9). Учёт и данные исправляются в цикле 1 funding/basis (cash-and-carry).
 
    Источник — раздел 0.2 и приложение A
-   [`funding-basis/cycle-1/1-hypothesis-and-decision-rule.md`](../research/funding-basis/cycle-1/1-hypothesis-and-decision-rule.md).
+   [`funding-carry/cycle-1/1-hypothesis-and-decision-rule.md`](../research/funding-carry/cycle-1/1-hypothesis-and-decision-rule.md).
 
 ## Не блокирует
 
@@ -48,7 +48,7 @@
    `risk.max_open_positions` — ограничению исполнителя, закреплённому
    `tests/test_portfolio_constraints.py`, — и книга больше этого лимита урезается без следа.
    Источник — E2 в разделе 0.2
-   [`funding-basis/cycle-1/1-hypothesis-and-decision-rule.md`](../research/funding-basis/cycle-1/1-hypothesis-and-decision-rule.md).
+   [`funding-carry/cycle-1/1-hypothesis-and-decision-rule.md`](../research/funding-carry/cycle-1/1-hypothesis-and-decision-rule.md).
 
 4. **`PnLSummary.sharpe_ratio` — не тот ряд и не те единицы.** `PnLTracker.close_position`
    дописывает в `equity_history` запись с настенным временем и эквити без нереализованного PnL
@@ -93,6 +93,8 @@
     (`data/exchange.py:72`, `:182`; `data/exchange_sync.py:42`, `:72`); таблица `candles` рынок
     не хранит, по самой БД его не различить. Вход, выход и отметка по рынку во всех бэктестах —
     по споту, а фандинг, спецификации и исполнение — перпетуала: изменение базиса перп − спот в
-    PnL не попадает. Насколько это влияет на вердикты CSM и MR, не измерялось. Для funding/basis
-    смещение связано с сигналом, поэтому цикл 1 идёт на перп-свечах. Источник — D1 в разделе 0.2
-    [`funding-basis/cycle-1/1-hypothesis-and-decision-rule.md`](../research/funding-basis/cycle-1/1-hypothesis-and-decision-rule.md).
+    PnL не попадает. Насколько это влияет на вердикты CSM и MR, не измерялось. Для межсекционного
+    carry смещение связано с сигналом, поэтому этому варианту нужны перп-свечи. Для cash-and-carry
+    спотовые свечи после проверки D1 — ценовой ряд спот-ноги, перп-нога идёт по перп-свечам.
+    Источник — D1 в разделе 0.2
+    [`funding-carry/cycle-1/1-hypothesis-and-decision-rule.md`](../research/funding-carry/cycle-1/1-hypothesis-and-decision-rule.md).

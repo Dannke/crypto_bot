@@ -25,7 +25,7 @@
 **Вердикт не меняется.** Строка описывает содержимое БД, а не вход расчёта. На test-окне CSM
 фандинга в БД нет вовсе, а в эквити портфельного бэктеста фандинг не попадает при любых данных —
 F2 и F3 в разделе 0.2
-[`funding-basis/cycle-1/1-hypothesis-and-decision-rule.md`](../funding-basis/cycle-1/1-hypothesis-and-decision-rule.md).
+[`funding-carry/cycle-1/1-hypothesis-and-decision-rule.md`](../funding-carry/cycle-1/1-hypothesis-and-decision-rule.md).
 
 **Остальные числа той же строки** — 776 спецификаций и 9 символов × 23K свечей — описывают
 состояние на дату записи и сейчас не воспроизводятся: кэш спецификаций перезапрашивается раз в
