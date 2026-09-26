@@ -1,6 +1,6 @@
 """Mean reversion feature: horizon-consistent z-score of a short-horizon log return.
 
-Definition (``docs/research/mr_cycle2_signal_definition.md``, section 1), per
+Definition (``docs/research/mean-reversion/cycle-2/1-signal-definition.md``, section 1), per
 symbol at the snapshot anchor, with ``h = signal_lookback_bars`` and
 ``W = window_bars``::
 

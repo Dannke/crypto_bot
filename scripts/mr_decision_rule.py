@@ -2,7 +2,7 @@
 """Decision rule MR цикла 2 — механически, из БД walk-forward прогона.
 
 Буквальная формулировка — в pre-registration цикла; структура — из
-docs/research/mr_cycle2_signal_definition.md, п. 6.5. Скрипт считает все четыре
+docs/research/mean-reversion/cycle-2/1-signal-definition.md, п. 6.5. Скрипт считает все четыре
 условия из БД, которые scripts/walk_forward.py сохраняет с --db-dir:
 
     1. Sharpe(test)       > 0

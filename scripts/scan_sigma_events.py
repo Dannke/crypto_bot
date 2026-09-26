@@ -2,7 +2,7 @@
 """Статистическая валидация z-score MR и сырая частота сигнала (цикл 2, шаг 2).
 
 Гейты и их границы предобъявлены до измерения в
-docs/research/mr_cycle2_signal_definition.md, раздел 6:
+docs/research/mean-reversion/cycle-2/1-signal-definition.md, раздел 6:
 
     G1  std(r_4h) / std(r_1h), лог-доходности, train, по КАЖДОМУ символу: [1.8, 2.2]
     G2  std(z), все символо-часы train:                                  [0.90, 1.10]

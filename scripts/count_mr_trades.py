@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Число сделок mean_reversion_v0 реальным Backtester на train-сегменте — без PnL.
 
-Правило выбора порога (docs/research/mr_cycle2_signal_definition.md, п. 6.3):
+Правило выбора порога (docs/research/mean-reversion/cycle-2/1-signal-definition.md, п. 6.3):
 n_train(k) — PnLSummary.total_trades реального Backtester на train-сегменте;
 конфигурация — регистрируемая (config/settings.yaml), кроме entry_threshold = k
 и risk.emergency_drawdown_pct = 100.0 (diagnostic_widened: стоп по просадке не
