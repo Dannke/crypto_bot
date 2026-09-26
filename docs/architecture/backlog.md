@@ -31,8 +31,9 @@
    - Перед решением о реальном капитале нужна валидация модели фандинга на пересекающихся данных
      (план MR, Task 9). Учёт и данные исправляются в цикле 1 funding/basis (cash-and-carry).
 
-   Источник — раздел 0.2 и приложение A
-   [`funding-carry/cycle-1/1-hypothesis-and-decision-rule.md`](../research/funding-carry/cycle-1/1-hypothesis-and-decision-rule.md).
+   Источник — [раздел 0.2](../research/funding-carry/cycle-1/1-hypothesis-and-decision-rule.md#02-не-переиспользуется-без-изменений--вопреки-брифу)
+   и [приложение A](../research/funding-carry/cycle-1/1-hypothesis-and-decision-rule.md#приложение-a-покрытие-данных--только-счётчики-и-метки-времени)
+   документа `funding-carry/cycle-1/1-hypothesis-and-decision-rule.md`.
 
 ## Не блокирует
 
@@ -41,29 +42,33 @@
    `data/cache/bybit_instruments.json` (TTL 24 ч), при промахе — из текущего списка Bybit. За
    одни сутки список изменился с 874 до 885 спецификаций: AVAXUSDT во вчерашнем отсутствовал,
    в сегодняшнем есть. Одна и та же команда в разные дни может прогнать разную эффективную
-   вселенную. Источник — поправка 2 в
-   [`cycle-2/1-signal-definition.md`](../research/mean-reversion/cycle-2/1-signal-definition.md).
+   вселенную. Источник —
+   [поправка 2](../research/mean-reversion/cycle-2/1-signal-definition.md#поправка-2-2026-09-26-после-заморозки-регистрации-c0b0375-до-прогона-walk-forward-avax-не-делистингован--исключение-держится-на-данных-а-не-на-спецификации)
+   в `cycle-2/1-signal-definition.md`.
    Отказ не виден и в журнале решений: бэктестер результат `open_position` не читает
    (`simulation/backtester.py:614–620`). Так же молча проходит отказ по глобальному
    `risk.max_open_positions` — ограничению исполнителя, закреплённому
    `tests/test_portfolio_constraints.py`, — и книга больше этого лимита урезается без следа.
-   Источник — E2 в разделе 0.2
-   [`funding-carry/cycle-1/1-hypothesis-and-decision-rule.md`](../research/funding-carry/cycle-1/1-hypothesis-and-decision-rule.md).
+   Источник — E2 в
+   [разделе 0.2](../research/funding-carry/cycle-1/1-hypothesis-and-decision-rule.md#02-не-переиспользуется-без-изменений--вопреки-брифу)
+   документа `funding-carry/cycle-1/1-hypothesis-and-decision-rule.md`.
 
 4. **`PnLSummary.sharpe_ratio` — не тот ряд и не те единицы.** `PnLTracker.close_position`
    дописывает в `equity_history` запись с настенным временем и эквити без нереализованного PnL
    остальных позиций; эквити пишется на каждом тике (часовые доходности), а множитель —
    дневной `sqrt(365)`. Знак не искажается, величина — примерно годовой Sharpe, делённый на
    `sqrt(24)`. Вердикт цикла 2 MR поэтому считался по таблице `equity` БД прогона
-   (`scripts/mr_decision_rule.py`). Источник — раздел 8
-   [`cycle-2/3-preregistration.md`](../research/mean-reversion/cycle-2/3-preregistration.md).
+   (`scripts/mr_decision_rule.py`). Источник —
+   [раздел 8](../research/mean-reversion/cycle-2/3-preregistration.md#8-известные-свойства-и-ограничения--раскрытие-не-гейты)
+   `cycle-2/3-preregistration.md`.
 
 5. **time-stop сдвигается на интервал каденции при post-only входе.** `opened_at` пишется
    временем исполнения лимитной заявки, то есть не раньше чем через бар после тика решения.
    При `rebalance_hours > 1` проверка на тике `T + max_holding` видит возраст на бар меньше, и
    выход уезжает на следующий тик (так в v4 вышло 60 ч вместо 48). При каденции в один бар и
-   рыночном входе не возникает. Механизм установлен чтением кода — раздел 8
-   [`cycle-2/1-signal-definition.md`](../research/mean-reversion/cycle-2/1-signal-definition.md).
+   рыночном входе не возникает. Механизм установлен чтением кода —
+   [раздел 8](../research/mean-reversion/cycle-2/1-signal-definition.md#8-открытые-пункты-handoff--статус-в-этом-цикле)
+   `cycle-2/1-signal-definition.md`.
 
 6. **Объявленные, но не действующие настройки.**
    - корреляционный фильтр инертен для market-стратегий: бэктестер передаёт риск-движку
@@ -96,5 +101,6 @@
     PnL не попадает. Насколько это влияет на вердикты CSM и MR, не измерялось. Для межсекционного
     carry смещение связано с сигналом, поэтому этому варианту нужны перп-свечи. Для cash-and-carry
     спотовые свечи после проверки D1 — ценовой ряд спот-ноги, перп-нога идёт по перп-свечам.
-    Источник — D1 в разделе 0.2
-    [`funding-carry/cycle-1/1-hypothesis-and-decision-rule.md`](../research/funding-carry/cycle-1/1-hypothesis-and-decision-rule.md).
+    Источник — D1 в
+    [разделе 0.2](../research/funding-carry/cycle-1/1-hypothesis-and-decision-rule.md#02-не-переиспользуется-без-изменений--вопреки-брифу)
+    документа `funding-carry/cycle-1/1-hypothesis-and-decision-rule.md`.

@@ -88,10 +88,11 @@ Backtester.run_async, на каждом тике:
 ## 5. Данные и конфигурация
 
 - `data/crypto_bot.db` (git не отслеживает): свечи 5m / 15m / 1h / 4h по вселенной
-  `simulation/market_constants.py::MARKET_QUOTE_VOLUME`, таблица `funding_rates` — только
-  январь 2024, таблицы исполнения `positions`, `trades`, `equity`, `decisions`. Покрытие свечей
-  печатает команда из приложения B документа
-  [`cycle-2/1-signal-definition.md`](../research/mean-reversion/cycle-2/1-signal-definition.md).
+  `simulation/market_constants.py::MARKET_QUOTE_VOLUME` — спотовые (п. 10 бэклога), таблица
+  `funding_rates` — только январь 2024, таблицы исполнения `positions`, `trades`, `equity`,
+  `decisions`. Покрытие свечей печатает команда из
+  [приложения B](../research/mean-reversion/cycle-2/1-signal-definition.md#приложение-b-покрытие-данных--только-временные-метки)
+  документа `cycle-2/1-signal-definition.md`.
 - `data/cache/bybit_instruments.json` — кэш спецификаций инструментов, TTL 24 ч (см. бэклог).
 - `config/settings.yaml` — единственный источник истины конфигурации. В документах он не
   дублируется; снимок, по которому получены числа исследования, лежит в его pre-registration
