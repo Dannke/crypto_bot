@@ -65,6 +65,120 @@ survivorship-смещение: бэктест оценивает вселенн�
 
 ---
 
+## Поправка 2 (2026-09-26, после заморозки регистрации `c0b0375`, до прогона walk-forward): AVAX не делистингован — исключение держится на данных, а не на спецификации
+
+Дополняет поправку 1, не заменяет её. Ни один зарегистрированный параметр и ни одно число
+регистрации (`mr_cycle2_preregistration.md`) не меняются.
+
+**Что обнаружено.** Раздел 7.1 регистрации требует перед прогоном убедиться, что все 8 символов
+исполнимы для бэктестера. Кэш спецификаций был сохранён 2026-09-25 11:16 UTC с TTL 24 ч и истёк
+бы посреди двух последовательных прогонов: бэктестер перезапросил бы список с биржи между
+окнами. Поэтому кэш обновлён до прогона тем же кодом, которым пользуется бэктестер
+(`build_instrument_cache`); прежний файл не удалён, а переименован. Каталог `data/` git
+игнорирует, так что прежний снимок сохранён только на диске.
+
+```bash
+mv data/cache/bybit_instruments.json data/cache/bybit_instruments.2026-09-25T1116Z.json && PYTHONIOENCODING=utf-8 python -c "
+import asyncio, json, time, datetime as d
+from pathlib import Path
+from crypto_bot.config.settings import load_settings
+from crypto_bot.data.instruments import CACHE_FILE, build_instrument_cache
+cfg = load_settings(yaml_path=Path('config/settings.yaml'))
+cache = asyncio.run(build_instrument_cache(cfg))
+new = json.load(open(CACHE_FILE, encoding='utf-8'))
+old = json.load(open('data/cache/bybit_instruments.2026-09-25T1116Z.json', encoding='utf-8'))
+f = lambda t: d.datetime.fromtimestamp(t, d.UTC).strftime('%Y-%m-%d %H:%M')
+print('новый кэш: saved_at', f(new['saved_at']), 'UTC; specs', len(new['specs']))
+print('прежний:   saved_at', f(old['saved_at']), 'UTC; specs', len(old['specs']))
+keys = ('contract_type', 'status', 'qty_step', 'min_notional_value')
+for s in ['BTC', 'ETH', 'SOL', 'XRP', 'ADA', 'DOGE', 'BNB', 'POL', 'AVAX']:
+    sym = s + 'USDT'
+    n, o = new['specs'].get(sym), old['specs'].get(sym)
+    same = (n is not None and o is not None and all(n[k] == o[k] for k in keys)) or (n is None and o is None)
+    state = 'НЕТ СПЕЦИФИКАЦИИ' if n is None else f\"{n['contract_type']} {n['status']} qty_step={n['qty_step']} min_notional={n['min_notional_value']}\"
+    print(f'{s}/USDT', 'tradable=' + str(cache.is_tradable_linear_perpetual(s + '/USDT')), state, '| как в прежнем кэше' if same else '| ОТЛИЧАЕТСЯ от прежнего')
+" 2>&1 | grep -v "^20[0-9][0-9]-.*INFO"
+```
+
+```
+новый кэш: saved_at 2026-09-26 07:09 UTC; specs 885
+прежний:   saved_at 2026-09-25 11:16 UTC; specs 874
+BTC/USDT tradable=True LinearPerpetual Trading qty_step=0.001 min_notional=5.0 | как в прежнем кэше
+ETH/USDT tradable=True LinearPerpetual Trading qty_step=0.01 min_notional=5.0 | как в прежнем кэше
+SOL/USDT tradable=True LinearPerpetual Trading qty_step=0.1 min_notional=5.0 | как в прежнем кэше
+XRP/USDT tradable=True LinearPerpetual Trading qty_step=0.1 min_notional=5.0 | как в прежнем кэше
+ADA/USDT tradable=True LinearPerpetual Trading qty_step=1.0 min_notional=5.0 | как в прежнем кэше
+DOGE/USDT tradable=True LinearPerpetual Trading qty_step=1.0 min_notional=5.0 | как в прежнем кэше
+BNB/USDT tradable=True LinearPerpetual Trading qty_step=0.01 min_notional=5.0 | как в прежнем кэше
+POL/USDT tradable=True LinearPerpetual Trading qty_step=1.0 min_notional=5.0 | как в прежнем кэше
+AVAX/USDT tradable=True LinearPerpetual Trading qty_step=0.1 min_notional=5.0 | ОТЛИЧАЕТСЯ от прежнего
+```
+
+В сегодняшнем списке AVAXUSDT есть и торгуется, во вчерашнем его не было. Делистинга, на который
+поправка 1 ссылалась как на согласующееся объяснение, нет: отсутствие спецификации было
+свойством одного ответа API. У 8 символов вселенной спецификации в обоих списках одинаковые — то
+есть условия, при которых шёл счёт сделок правила 6.3, сохраняются.
+
+**Почему вывод не меняется: основание — данные.** Свежий запрос к БД, 2026-09-26 07:19 UTC:
+
+```bash
+PYTHONIOENCODING=utf-8 python -c "
+import sqlite3, datetime as d
+c = sqlite3.connect('data/crypto_bot.db')
+f = lambda m: d.datetime.fromtimestamp(m / 1000, d.UTC).strftime('%Y-%m-%d %H:%M')
+end = int(d.datetime(2026, 9, 17, tzinfo=d.UTC).timestamp() * 1000)
+q = '''select symbol, timeframe, count(*), max(ts_ms) from candles
+       where symbol in ('AVAX/USDT','BTC/USDT','ETH/USDT','SOL/USDT','XRP/USDT','ADA/USDT','DOGE/USDT','BNB/USDT','POL/USDT')
+       group by symbol, timeframe order by timeframe, symbol'''
+for s, tf, n, mx in c.execute(q):
+    extra = ''
+    if tf == '1h':
+        missing = (end - (mx + 3600000)) // 3600000 if mx + 3600000 < end else 0
+        extra = f'  до конца окна 2026-09-17 00:00 не хватает 1h-баров: {missing}'
+    print(f'{s:10} {tf:4} bars={n:7} max_ts_ms={mx} max_open={f(mx)}{extra}')
+"
+```
+
+Вывод (фрагмент — строки таймфрейма 1h):
+
+```
+ADA/USDT   1h   bars=  23783 max_ts_ms=1789657200000 max_open=2026-09-17 15:00  до конца окна 2026-09-17 00:00 не хватает 1h-баров: 0
+AVAX/USDT  1h   bars=  22789 max_ts_ms=1786078800000 max_open=2026-08-07 05:00  до конца окна 2026-09-17 00:00 не хватает 1h-баров: 978
+BNB/USDT   1h   bars=  23783 max_ts_ms=1789657200000 max_open=2026-09-17 15:00  до конца окна 2026-09-17 00:00 не хватает 1h-баров: 0
+BTC/USDT   1h   bars=  23783 max_ts_ms=1789657200000 max_open=2026-09-17 15:00  до конца окна 2026-09-17 00:00 не хватает 1h-баров: 0
+DOGE/USDT  1h   bars=  23783 max_ts_ms=1789657200000 max_open=2026-09-17 15:00  до конца окна 2026-09-17 00:00 не хватает 1h-баров: 0
+ETH/USDT   1h   bars=  23783 max_ts_ms=1789657200000 max_open=2026-09-17 15:00  до конца окна 2026-09-17 00:00 не хватает 1h-баров: 0
+POL/USDT   1h   bars=  23783 max_ts_ms=1789657200000 max_open=2026-09-17 15:00  до конца окна 2026-09-17 00:00 не хватает 1h-баров: 0
+SOL/USDT   1h   bars=  23783 max_ts_ms=1789657200000 max_open=2026-09-17 15:00  до конца окна 2026-09-17 00:00 не хватает 1h-баров: 0
+XRP/USDT   1h   bars=  23783 max_ts_ms=1789657200000 max_open=2026-09-17 15:00  до конца окна 2026-09-17 00:00 не хватает 1h-баров: 0
+```
+
+Последний 1h-бар AVAX открыт 2026-08-07 05:00; до конца зарегистрированного окна не хватает 978
+часовых баров, и все они лежат внутри test-сегмента (2025-11-24 00:00 .. 2026-09-17 00:00). С AVAX
+вселенная менялась бы посреди test — именно этого первая редакция раздела 5 (`7815f3b`) избегала,
+заканчивая окно на данных AVAX. Вернуться к той редакции (9 символов, окно до 2026-08-07) значило
+бы оформить новую регистрацию уже после измерений на 8 символах. Этого не требуется: вселенная из
+8 символов выбрана до измерений и остаётся согласованной с окном.
+
+**Что исправлено в тексте.** Формулировка «survivorship: символ пропал с площадки» (поправка 1,
+абзац «Цена, принимаемая явно»; регистрация, раздел 8, п. 2) неверна — на площадке символ есть.
+Корректно: AVAX исключён, потому что (а) его 1h-данные в БД обрываются 2026-08-07 05:00, причина
+обрыва не установлена; (б) исполнимость символа в бэктесте зависит от списка спецификаций,
+который меняется от запроса к запросу. Объяснение открытого пункта 5 handoff (поправка 1:
+«по-видимому», из-за отсутствия спецификации) остаётся гипотезой: кэш на даты раунда 3 не
+сохранился, проверить нельзя.
+
+**Открытый пункт — хрупкость состава вселенной, зависящего от живого API.** Исполнимость символа
+и правила округления объёма в бэктесте определяются ответом биржи на день запуска: кэш живёт
+24 ч, при промахе список перезапрашивается, а отсутствующий символ отвергается молча
+(fail-closed). Одна и та же команда в разные дни может прогнать разную эффективную вселенную —
+это вопрос воспроизводимости, а не survivorship: за одни сутки число спецификаций изменилось с 874
+до 885. Для этого прогона риск снят явным `--symbols`, свежим кэшем, который действует до
+2026-09-27 07:09 UTC, и проверкой 7.1 непосредственно перед запуском. Общее решение —
+версионированный снимок спецификаций для бэктестов — заведено отдельной задачей.
+
+---
+
 ## 1. Решение
 
 Для каждого символа в момент решения `t` (закрытие последнего закрытого бара, timeframe 1h):
