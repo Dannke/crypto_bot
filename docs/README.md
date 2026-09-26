@@ -36,7 +36,7 @@ docs/
 │   └── backlog.md                     ← открытые пункты
 └── research/
     ├── csm/
-    │   └── closure.md
+    │   └── closure.md                 ← вердикт, поправка 1
     ├── funding-basis/
     │   └── cycle-1/
     │       └── 1-hypothesis-and-decision-rule.md ← гипотеза, decision rule, сетка — до измерений
