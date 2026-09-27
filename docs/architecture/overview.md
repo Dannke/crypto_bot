@@ -1,6 +1,6 @@
 # Архитектура crypto_bot — обзор
 
-**Обновлено:** 2026-09-26. Документ описывает систему такой, какая она в коде; при расхождении
+**Обновлено:** 2026-09-27. Документ описывает систему такой, какая она в коде; при расхождении
 прав код. Открытые пункты — в [`backlog.md`](backlog.md), исследовательские вердикты — в
 [`docs/research/`](../research/), карта всей документации — в [`docs/README.md`](../README.md).
 
@@ -50,6 +50,10 @@
 HistoricalCandleSource (вся история загружается один раз)
   ↓ единые часы: тик на закрытии каждого бара любого таймфрейма
 Backtester.run_async, на каждом тике:
+  0. _accrue_funding(as_of)             — расчёты фандинга до этого тика, каждый один раз на
+                                          позицию (simulation/funding_accrual.py); до решений:
+                                          закрытая на тике позиция расчёт этого тика получает,
+                                          открытая на нём — нет
   1. аварийный стоп по просадке (risk.emergency_drawdown_pct; стоп липкий)
   2. _process_post_only(as_of)            — исполнение висящих post-only заявок
   3. _run_portfolio_tick — только если наступил ребаланс (rebalance_hours активной стратегии):
@@ -60,14 +64,17 @@ Backtester.run_async, на каждом тике:
        _rebalance_positions(report)        — закрыть всё, что выпало из целевой книги
        PortfolioExecutor.open_position(...) — открыть новые позиции
   4. check_positions_range                 — SL/TP (для mean_reversion_v0 отключены)
-  5. accrue_funding
-  6. _record_equity(as_of)                 — одна mark-to-market точка на тик (таблица equity)
+  5. _record_equity(as_of)                 — одна mark-to-market точка на тик (таблица equity):
+                                          начальный капитал + PnL закрытых + фандинг открытых +
+                                          нереализованный PnL; тот же расчёт у аварийного стопа
 ```
 
 Исключение внутри тика ловится широким `except`: тик теряется целиком, вместе с входами и
-выходами (`scripts/count_mr_trades.py` считает такие тики). Walk-forward
-(`simulation/walk_forward.py`) режет историю первого символа `calendar_split`-ом на 2 или 3
-окна; `--start/--end` закрепляют окно данных.
+выходами (`scripts/count_mr_trades.py` считает такие тики). Начисление фандинга стоит до этого
+блока, и потерянный тик расчёт не теряет. Walk-forward (`simulation/walk_forward.py`) режет
+историю первого символа `calendar_split`-ом на 2 или 3 окна; `--start/--end` закрепляют окно
+данных. Каждое окно идёт на свежей БД, поэтому фандинг ему передаётся из БД данных
+(`fetch_funding_source`), как свечи.
 
 ---
 
@@ -75,7 +82,7 @@ Backtester.run_async, на каждом тике:
 
 | область | что реализовано | где |
 |---|---|---|
-| исполнение (R0) | фандинг; спецификации инструментов; маржа и плечо; модель издержек fee + slippage + funding | `data/funding.py`, `data/instruments.py`, `portfolio/risk.py`, `execution/costs.py` |
+| исполнение (R0) | фандинг; спецификации инструментов; маржа и плечо; модель издержек fee + slippage + funding | `data/funding.py`, `simulation/funding_accrual.py`, `data/instruments.py`, `portfolio/risk.py`, `execution/costs.py` |
 | режимы (R1–R5) | конфиг; индикаторы ADX, ATR%, перцентиль; классификатор 2 оси → 4 режима с гистерезисом; множители экспозиции по стратегиям (без override — 1.0) | `config/schemas.py`, `indicators/regime.py`, `portfolio/regime.py`, `pipeline/portfolio_fusion.py` |
 | проводка (R6) | Settings → PortfolioConfig → стратегия и режимы через фабрику | `pipeline/factory.py` |
 | walk-forward (R7) | сравнение с гейтингом и без; проверялось на CSM без эджа — полезность гейта не доказана | `scripts/walk_forward_regime_comparison.py` |
@@ -113,6 +120,7 @@ src/crypto_bot/
 ├── simulation/backtester.py           # единый Backtester
 ├── simulation/walk_forward.py         # calendar_split, pin_candles, run_walk_forward
 ├── simulation/portfolio_executor.py   # PortfolioExecutor
+├── simulation/funding_accrual.py      # начисление фандинга открытым позициям, общее для исполнителей
 ├── simulation/pnl.py                  # PnLTracker, PnLSummary, функции Sharpe
 ├── orchestrator_portfolio.py          # живой portfolio-оркестратор
 └── cli.py
@@ -124,6 +132,7 @@ scripts/                               # исследовательские ин
 ├── scan_sigma_events.py               # статистическая валидация z и сырая частота
 ├── count_mr_trades.py                 # счёт сделок реальным Backtester, без PnL
 ├── mr_decision_rule.py                # decision rule цикла 2 MR из БД прогона
+├── reproduce_mr_cycle2.py             # воспроизведение прогона цикла 2 MR число в число
 └── sigma_definition_theory.py         # теория и синтетика для определения z
 ```
 
