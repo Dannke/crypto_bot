@@ -23,8 +23,9 @@ and every window replays on a fresh database of its own.
 
 Passes (exit 0) when both hold:
 1. decisions, equity, positions, trades and funding_payments of each window
-   equal data/backtests/mr_cycle2_production/ row for row (created_at /
-   updated_at aside — wall-clock). Only counts are printed, no values;
+   equal data/backtests/mr_cycle2_production/ row for row, apart from the
+   columns stamped with the time of writing (created_at, updated_at,
+   trades.ts_ms). Only counts are printed, no values;
 2. scripts/mr_decision_rule.py on the reproduced databases prints the block
    published in 4-closure.md, section 1, and exits 1 (REJECT) as there.
 
@@ -84,7 +85,12 @@ SPLIT, VALIDATION_SPLIT = 0.5, 0.2
 TEST_START, TEST_END = "2025-11-24 00:00", "2026-09-17 00:00"
 
 TABLES = ("decisions", "equity", "positions", "trades", "funding_payments")
+# Stamped with the time of writing, not the simulated time, so two replays differ
+# in them by construction: created_at / updated_at everywhere, and trades.ts_ms —
+# TradeRepository.insert writes time.time(). Simulated times are compared through
+# decisions.ts_ms, equity.ts_ms and positions.opened_at_ms / closed_at_ms.
 WALL_CLOCK_COLUMNS = {"created_at", "updated_at"}
+WALL_CLOCK_BY_TABLE = {"trades": {"ts_ms"}}
 PRODUCTION_LABEL = "data/backtests/mr_cycle2_production"
 CLOSURE_OUTPUT_MARKER = "Вывод (код возврата 1 = REJECT):"
 
@@ -176,9 +182,10 @@ def table_rows(path: Path, table: str) -> tuple[list[str], list[tuple]]:
     # Read-only and raw: Database() would migrate the production databases to v11
     conn = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True)
     try:
+        wall_clock = WALL_CLOCK_COLUMNS | WALL_CLOCK_BY_TABLE.get(table, set())
         columns = [
             row[1] for row in conn.execute(f"PRAGMA table_info({table})")
-            if row[1] not in WALL_CLOCK_COLUMNS
+            if row[1] not in wall_clock
         ]
         rows = conn.execute(f"SELECT {', '.join(columns)} FROM {table} ORDER BY rowid").fetchall()
         return columns, rows

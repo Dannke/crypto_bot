@@ -151,3 +151,11 @@
     `tests/test_simulation/test_equity.py` и `tests/test_backtest/test_equity_tracking.py`
     проверяют только эквити после закрытия и расхождения не видят. Источник — установлено при
     [Task 1](../research/funding-basis/plan.md#task-1--учёт-фандинга-f0f5--m--pr-a) плана funding/basis, проверено на синтетике.
+
+15. **`trades.ts_ms` в бэктесте — время записи, а не время бара.** `TradeRepository.insert`
+    ставит `ts_ms = int(time.time() * 1000)` (`storage/db.py`), поэтому журнал сделок бэктеста
+    хранит момент запуска, и два прогона одной команды расходятся в этом столбце в каждой строке.
+    Время симуляции — в `positions.opened_at_ms` / `closed_at_ms`, `decisions.ts_ms` и
+    `equity.ts_ms`; любой анализ БД бэктеста по `trades.ts_ms` (оборот во времени, сделки
+    сегмента) неверен. `scripts/reproduce_mr_cycle2.py` исключает столбец из сравнения. Источник —
+    воспроизведение цикла 2 MR при [Task 1](../research/funding-basis/plan.md#task-1--учёт-фандинга-f0f5--m--pr-a) плана funding/basis.
