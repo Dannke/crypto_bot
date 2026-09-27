@@ -118,14 +118,17 @@ def test_funding_uses_mark_price():
     assert_approx(result.fee_abs, 0.36)
 
 
-def test_funding_fallback_to_entry_price():
-    """Funding falls back to entry_price when mark_price is None."""
+def test_funding_fallback_to_reference_price():
+    """Funding falls back to the reference price when mark_price is None.
+
+    The backtester passes the close of the bar ending at the settlement.
+    """
     model = FundingCostModel()
     events = [
         FundingEvent("BTCUSDT", 1_000_000, 0.0001, None),
     ]
     result = model.accrue(Side.LONG, 0.1, 35000.0, events)
-    # notional = 0.1 * 35000 = 3500 (uses entry price)
+    # notional = 0.1 * 35000 = 3500 (uses the reference price)
     # cost = 3500 * 0.0001 = 0.35
     assert_approx(result.fee_abs, 0.35)
 

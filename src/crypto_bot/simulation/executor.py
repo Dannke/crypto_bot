@@ -10,7 +10,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from ..config.env import Config
-from ..core.enums import ExecutorOutcome, Mode, OrderType, RejectReason, Side, Signal, TradeStatus
+from ..core.enums import ExecutorOutcome, Mode, OrderType, RejectReason, Signal, TradeStatus
 from ..core.logging_setup import get_logger
 from ..core.types import DecisionRecord
 from ..data.funding import HistoricalFundingSource
@@ -18,6 +18,7 @@ from ..data.instruments import InstrumentCache
 from ..decision.decision_report import DecisionReport
 from ..execution.costs import CompositeCostModel, ExecutionCostModel
 from ..simulation.fees import FeeCalculator
+from ..simulation.funding_accrual import PriceAt, credit_funding
 from ..simulation.paper_position import PaperPosition
 from ..simulation.pnl import PnLTracker
 from ..simulation.sl_tp import SLTPCalculator
@@ -657,69 +658,37 @@ class SignalExecutor:
         self,
         funding_source: HistoricalFundingSource,
         bar_timestamp_ms: int,
+        price_at: PriceAt,
         cost_model: ExecutionCostModel | CompositeCostModel | None = None,
     ) -> dict[str, Any]:
-        """Accrue funding for all open positions at a bar timestamp.
+        """Credit open positions with every funding settlement up to the bar.
 
-        Called on each bar close in backtest to apply funding payments
-        for positions held across funding timestamps.
+        Same rule as the portfolio executor (``credit_funding``). Funding is
+        credited only when a cost model with a funding model is set — here or
+        by the backtest driver on ``_costs`` — so a candidate run with funding
+        disabled stays funding-free. The candidate path keeps no
+        ``funding_payments`` journal.
 
         Args:
             funding_source: HistoricalFundingSource with loaded funding events
             bar_timestamp_ms: Current bar close timestamp (ms epoch)
-            cost_model: Optional cost model with funding support (defaults to legacy)
+            price_at: Price of (symbol, timeframe) at a settlement time, used
+                when an event has no mark price.
+            cost_model: Cost model with funding support; defaults to ``_costs``.
 
         Returns:
             Dict with funding stats per symbol and total.
         """
+        model = cost_model if cost_model is not None else getattr(self, "_costs", None)
+        credits = credit_funding(
+            self._tracker.positions, funding_source, bar_timestamp_ms, model, price_at,
+        )
         stats: dict[str, Any] = {
-            "accrued_count": 0,
-            "total_funding": 0.0,
+            "accrued_count": len(credits),
+            "total_funding": sum(credit.amount for credit in credits),
             "by_symbol": {},
         }
-
-        for paper_pos in list(self._tracker.positions):
-            if not paper_pos.is_open:
-                continue
-
-            symbol = paper_pos.symbol
-            events = funding_source.events_up_to(bar_timestamp_ms, symbol)
-            if not events:
-                continue
-
-            # Filter to events that occurred since position open
-            position_opened_ms = int(paper_pos.entry_time.timestamp() * 1000)
-            relevant_events = [
-                e for e in events
-                if e.funding_time_ms > position_opened_ms and e.funding_time_ms <= bar_timestamp_ms
-            ]
-            if not relevant_events:
-                continue
-
-            # Use provided cost model or fall back to simple funding accrual
-            if cost_model and hasattr(cost_model, 'accrue_funding'):
-                funding_result = cost_model.accrue_funding(  # type: ignore[attr-defined]
-                    side=paper_pos.side,
-                    weight=paper_pos.size / self._tracker.current_equity * paper_pos.entry_price,
-                    entry_price=paper_pos.entry_price,
-                    funding_events=relevant_events,
-                )
-                funding_amount = funding_result.net_amount
-            else:
-                # Simple funding accrual using legacy fee calculator
-                notional = paper_pos.size * paper_pos.entry_price
-                funding_amount = 0.0
-                for event in relevant_events:
-                    if paper_pos.side == Side.LONG:
-                        funding_amount += notional * event.funding_rate
-                    else:
-                        funding_amount -= notional * event.funding_rate
-                funding_amount = -funding_amount  # negative = cost to P&L
-
-            if funding_amount != 0:
-                paper_pos.apply_funding(funding_amount)
-                stats["total_funding"] += funding_amount
-                stats["accrued_count"] += 1
-                stats["by_symbol"][symbol] = stats["by_symbol"].get(symbol, 0.0) + funding_amount
-
+        for credit in credits:
+            symbol = credit.position.symbol
+            stats["by_symbol"][symbol] = stats["by_symbol"].get(symbol, 0.0) + credit.amount
         return stats

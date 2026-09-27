@@ -32,6 +32,7 @@ from ..config.schemas import RegimeConfig
 from ..core.enums import StrategyType
 from ..core.logging_setup import get_logger
 from ..core.types import Candle
+from ..data.funding import FundingRepository, HistoricalFundingSource
 from ..execution.costs import CompositeCostModel
 from ..features.context import SymbolMarketContext
 from ..portfolio import (
@@ -196,8 +197,14 @@ async def _run_single_window(
     enable_funding: bool = True,
     max_leverage: float = 10.0,
     maintenance_margin_buffer_pct: float = 0.1,
+    funding_source: HistoricalFundingSource | None = None,
 ) -> PnLSummary:
-    """Run a single backtest window."""
+    """Run a single backtest window.
+
+    ``funding_source`` carries the funding history from the data database; the
+    window's own database is created empty, so without it the backtester would
+    see no funding at all (F0).
+    """
     from ..storage.db import Database
 
     if start_ms is None or end_ms is None:
@@ -220,6 +227,7 @@ async def _run_single_window(
         portfolio_limits=portfolio_limits,
         regime_config=regime_config,
         market_map=market_map,
+        funding_source=funding_source,
     )
     # R0.5: Apply cost model (funding-aware, legacy, or maker-only for MR post-only)
     strategy_name = getattr(config.settings.portfolio, 'strategy_name', None)
@@ -261,6 +269,8 @@ def run_walk_forward(
     # Pinned data window: first symbol's bars with open time in [start_ms, end_ms)
     start_ms: int | None = None,
     end_ms: int | None = None,
+    # Funding history from the data database, handed to every window (F0)
+    funding_source: HistoricalFundingSource | None = None,
 ) -> WalkForwardResult:
     """Run walk-forward analysis on calendar windows (2-way or 3-way split).
 
@@ -284,6 +294,9 @@ def run_walk_forward(
         start_ms: Pin the split to bars opening at or after this time (None = first bar).
         end_ms: Pin the split to bars opening before this time (None = last bar).
                 History before start_ms stays in ``source`` for warmup.
+        funding_source: Funding history for the windows, e.g. ``fetch_funding_source``
+                over the data database. Each window runs on a fresh database of its
+                own, so without it no window sees any funding.
 
     Returns:
         WalkForwardResult with train/validation/test summaries and overfit hint.
@@ -344,6 +357,7 @@ def run_walk_forward(
         enable_funding=enable_funding,
         max_leverage=max_leverage,
         maintenance_margin_buffer_pct=maintenance_margin_buffer_pct,
+        funding_source=funding_source,
     ))
 
     # Run validation window (3-way only)
@@ -360,6 +374,7 @@ def run_walk_forward(
             enable_funding=enable_funding,
             max_leverage=max_leverage,
             maintenance_margin_buffer_pct=maintenance_margin_buffer_pct,
+            funding_source=funding_source,
         ))
 
     # Run test window
@@ -374,6 +389,7 @@ def run_walk_forward(
         enable_funding=enable_funding,
         max_leverage=max_leverage,
         maintenance_margin_buffer_pct=maintenance_margin_buffer_pct,
+        funding_source=funding_source,
     ))
 
     # Get strategy name
@@ -402,6 +418,25 @@ def run_walk_forward(
         test_end_ms=test_end,
         split_type="3-way" if three_way else "2-way",
     )
+
+
+def fetch_funding_source(db_path: str, symbols: list[str]) -> HistoricalFundingSource:
+    """Load the whole funding history of ``symbols`` from the data database.
+
+    Walk-forward windows run on fresh databases of their own, so the funding
+    history has to come from the data database, like the candles (F0). The
+    source filters by settlement time on every read, so loading all of it
+    leaks nothing into a window.
+    """
+    db = Database(db_path)
+    try:
+        repo = FundingRepository(db)
+        source = HistoricalFundingSource()
+        for sym in symbols:
+            source.load_events(sym, repo.get_events(sym, 0, 2**63 - 1))
+        return source
+    finally:
+        db.close()
 
 
 def fetch_all_candles(db_path: str, symbols: list[str], timeframe: str) -> dict[str, list[Candle]]:

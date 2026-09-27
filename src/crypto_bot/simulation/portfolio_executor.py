@@ -20,11 +20,12 @@ from ..config.env import Config
 from ..core.enums import Mode, OrderType, Side, TradeStatus
 from ..core.logging_setup import get_logger
 from ..core.types import Position
-from ..data.funding import FundingEvent, HistoricalFundingSource
+from ..data.funding import HistoricalFundingSource
 from ..data.instruments import InstrumentCache
 from ..execution.costs import CompositeCostModel, ExecutionCostModel
 from ..portfolio import PositionIntent
 from ..simulation.executor import _resolve_tf_tp
+from ..simulation.funding_accrual import PriceAt, credit_funding
 from ..simulation.paper_position import PaperPosition
 from ..simulation.pnl import PnLTracker
 from ..simulation.sl_tp import SLTPCalculator
@@ -260,6 +261,7 @@ class PortfolioExecutor:
             take_profit=levels.take_profit,
             entry_time=datetime.fromtimestamp(timestamp_ms / 1000, tz=UTC),
             entry_fee_abs=entry_fee_abs,
+            position_id=position_id,
         )
         self._tracker.add_position(position)
 
@@ -460,6 +462,7 @@ class PortfolioExecutor:
             take_profit=levels.take_profit,
             entry_time=datetime.fromtimestamp(timestamp_ms / 1000, tz=UTC),
             entry_fee_abs=entry_fee_abs,
+            position_id=position_id,
         )
         self._tracker.add_position(position)
 
@@ -830,98 +833,54 @@ class PortfolioExecutor:
         self,
         funding_source: HistoricalFundingSource,
         bar_timestamp_ms: int,
+        price_at: PriceAt,
     ) -> dict[str, Any]:
-        """Accrue funding for all open positions at a bar timestamp.
+        """Credit open positions with every funding settlement up to the bar.
 
-        Called on each bar close in backtest to apply funding payments
-        for positions held across funding timestamps.
+        The rule is ``simulation.funding_accrual.credit_funding``: each settlement
+        once per position, notional ``quantity × price at the settlement``.
+        Every credit is journaled in ``funding_payments`` as the payment the
+        position made — positive paid, negative received, the table's sign since
+        v6 — so the journal sums to minus the funding inside equity. The table
+        allows one row per position and settlement (schema v11), so a repeated
+        credit fails loudly.
 
         Args:
             funding_source: HistoricalFundingSource with loaded funding events
             bar_timestamp_ms: Current bar close timestamp (ms epoch)
+            price_at: Price of (symbol, timeframe) at a settlement time, used
+                when an event has no mark price.
 
         Returns:
-            Dict with funding stats per symbol and total.
+            Dict with funding stats per symbol and total; amounts as received.
         """
+        # Checked before any credit: a position credited in memory but missing
+        # from the journal would make the two disagree without a trace.
+        for position in self._tracker.positions:
+            if position.is_open and position.position_id is None:
+                raise ValueError(
+                    f"open position {position.symbol} {position.timeframe} has no row in positions"
+                )
+        credits = credit_funding(
+            self._tracker.positions, funding_source, bar_timestamp_ms, self._costs, price_at,
+        )
         stats: dict[str, Any] = {
-            "accrued_count": 0,
-            "total_funding": 0.0,
+            "accrued_count": len(credits),
+            "total_funding": sum(credit.amount for credit in credits),
             "by_symbol": {},
         }
-
-        for paper_pos in list(self._tracker.positions):
-            if not paper_pos.is_open:
-                continue
-
-            symbol = paper_pos.symbol
-            events = funding_source.events_up_to(bar_timestamp_ms, symbol)
-            if not events:
-                continue
-
-            # Filter to events that occurred since the last bar (or position open)
-            # For simplicity, we check all events up to bar_timestamp_ms and
-            # the tracker will handle deduplication via position state
-            # In practice, we'd track last_funding_time per position
-            position_opened_ms = int(paper_pos.entry_time.timestamp() * 1000)
-            relevant_events = [
-                e for e in events
-                if e.funding_time_ms > position_opened_ms and e.funding_time_ms <= bar_timestamp_ms
-            ]
-            if not relevant_events:
-                continue
-
-            # Calculate funding using the composite cost model
-            funding_result = self._costs.accrue_funding(
-                side=paper_pos.side,
-                weight=paper_pos.size / self._tracker.current_equity * paper_pos.entry_price,
-                entry_price=paper_pos.entry_price,
-                funding_events=relevant_events,
+        for credit in credits:
+            position = credit.position
+            stats["by_symbol"][position.symbol] = (
+                stats["by_symbol"].get(position.symbol, 0.0) + credit.amount
             )
-
-            if funding_result.net_amount != 0:
-                # Apply funding to tracker (negative net_amount = cost to P&L)
-                paper_pos.apply_funding(funding_result.net_amount)
-                stats["total_funding"] += funding_result.net_amount
-                stats["accrued_count"] += 1
-                stats["by_symbol"][symbol] = stats["by_symbol"].get(symbol, 0.0) + funding_result.net_amount
-
-                # Persist funding payment to DB for audit trail
-                self._persist_funding_payment(paper_pos, relevant_events, funding_result)
-
+            self._repos.db.conn.execute(
+                "INSERT INTO funding_payments (position_id, funding_time_ms, amount) VALUES (?, ?, ?)",
+                (position.position_id, credit.event.funding_time_ms, -credit.amount),
+            )
+        if credits:
+            self._repos.db.conn.commit()
         return stats
-
-    def _persist_funding_payment(
-        self,
-        paper_pos: PaperPosition,
-        events: list[FundingEvent],
-        funding_result,
-    ) -> None:
-        """Persist funding payments to funding_payments table for audit."""
-        # Find the corresponding DB position
-        for db_pos in self._repos.positions.list_open():
-            if (
-                db_pos.symbol == paper_pos.symbol
-                and db_pos.timeframe == paper_pos.timeframe
-                and db_pos.side == paper_pos.side
-            ):
-                for event in events:
-                    # Calculate individual event amount
-                    mark = event.mark_price if event.mark_price is not None else paper_pos.entry_price
-                    notional = abs(paper_pos.size) * mark
-                    if paper_pos.side.value == "LONG":
-                        amount = notional * event.funding_rate
-                    else:
-                        amount = -notional * event.funding_rate
-
-                    # Only persist non-zero amounts
-                    if abs(amount) > 1e-10:
-                        self._repos.db.conn.execute(
-                            """INSERT INTO funding_payments (position_id, funding_time_ms, amount)
-                               VALUES (?, ?, ?)""",
-                            (db_pos.id, event.funding_time_ms, amount),
-                        )
-                self._repos.db.conn.commit()
-                break
 
 
 __all__ = ["PortfolioExecutionResult", "PortfolioExecutor"]
