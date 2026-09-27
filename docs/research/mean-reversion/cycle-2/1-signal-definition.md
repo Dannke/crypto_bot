@@ -182,6 +182,50 @@ XRP/USDT   1h   bars=  23783 max_ts_ms=1789657200000 max_open=2026-09-17 15:00  
 TTL 24 ч) и проверкой 7.1 непосредственно перед запуском. Общее решение —
 версионированный снимок спецификаций для бэктестов — заведено отдельной задачей.
 
+## Поправка 3 (2026-09-27): кэш спецификаций 2026-09-25 — список testnet, а не ответ mainnet
+
+Дополняет поправку 2, не заменяет её. Ни одно число регистрации и ни один вывод цикла не
+меняются.
+
+**Что неверно.** Поправка 2 объясняет отсутствие AVAXUSDT в кэше 2026-09-25 «свойством одного
+ответа API» и называет расхождение 874 и 885 спецификаций изменением списка за сутки. Файл
+`bybit_instruments.2026-09-25T1116Z.json` — список testnet Bybit: его ключи совпадают со списком,
+который 2026-09-27 записал в кэш полный прогон тестов, — там тестовые инструменты `TST*` и нет
+AVAXUSDT, а в снимке mainnet 2026-09-26 AVAXUSDT есть. Копия кэша, записанного тестами, —
+`data/cache/bybit_instruments_testnet_2026-09-27T0709Z.json` (`data/` git не отслеживает):
+
+```bash
+PYTHONIOENCODING=utf-8 python -c "
+import json, datetime as d
+load = lambda n: json.load(open(f'data/cache/{n}.json', encoding='utf-8'))
+main, test, old = (load(n) for n in ('bybit_instruments_2026-09-26T0709Z', 'bybit_instruments_testnet_2026-09-27T0709Z', 'bybit_instruments.2026-09-25T1116Z'))
+t = lambda j: d.datetime.fromtimestamp(j['saved_at'], d.UTC).strftime('%Y-%m-%d %H:%M:%S')
+print('saved_at: mainnet', t(main), '| testnet', t(test))
+print('specs: mainnet', len(main['specs']), '| testnet', len(test['specs']), '| 2026-09-25 file', len(old['specs']), '| 2026-09-25 file == testnet:', set(old['specs']) == set(test['specs']))
+print({s: (s in main['specs'], s in test['specs']) for s in ('AVAXUSDT', 'AUSDT', 'BUSDT', 'CUSDT', 'DUSDT', 'EUSDT')})
+print('testnet-only with TST:', sorted(s for s in set(test['specs']) - set(main['specs']) if 'TST' in s)[:3])
+"
+```
+
+```
+saved_at: mainnet 2026-09-26 07:09:14 | testnet 2026-09-27 07:09:19
+specs: mainnet 885 | testnet 874 | 2026-09-25 file 874 | 2026-09-25 file == testnet: True
+{'AVAXUSDT': (True, False), 'AUSDT': (True, True), 'BUSDT': (True, True), 'CUSDT': (True, True), 'DUSDT': (False, False), 'EUSDT': (False, False)}
+testnet-only with TST: ['100000TSTSATSUSDT', 'FNDTSTPERP', 'MMTTSTUSDT']
+```
+
+**Механизм.** Кэш `data/cache/bybit_instruments.json` один на testnet и mainnet. Адрес API
+выбирает `exchange.sandbox` (`data/instruments.py`): по умолчанию в схеме `True` — testnet, в
+`config/settings.yaml` `false` — mainnet, `.env` флаг не задаёт. Тесты с `Settings()` по умолчанию
+обновляют кэш списком testnet, команды через `load_settings` — списком mainnet, и в кэше
+оказывается список того, кто обновил его первым после истечения TTL (п. 13
+[бэклога](../../../architecture/backlog.md#не-блокирует)).
+
+**Что не меняется.** AVAX исключён по данным (поправка 2). Production-прогон шёл на снимке
+mainnet 2026-09-26 07:09. Кэш 2026-09-25, при котором шёл счёт сделок правила 6.3, — список
+testnet, но спецификации восьми символов вселенной в нём такие же, как в mainnet (таблица
+поправки 2), поэтому вывод поправки 2 о сохранении условий счёта верен.
+
 ---
 
 ## 1. Решение
