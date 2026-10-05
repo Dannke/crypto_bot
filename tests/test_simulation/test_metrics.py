@@ -11,10 +11,10 @@ import math
 import statistics
 
 import pytest
-from crypto_bot.simulation.metrics import GridError
 
 from crypto_bot.core.enums import Mode, Side, TradeStatus
 from crypto_bot.simulation import metrics
+from crypto_bot.simulation.metrics import GridError
 from crypto_bot.storage.db import Database, Repositories
 
 HOUR = metrics.MS_PER_HOUR
