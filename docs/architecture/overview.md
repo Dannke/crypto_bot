@@ -121,7 +121,8 @@ src/crypto_bot/
 ├── simulation/walk_forward.py         # calendar_split, pin_candles, run_walk_forward
 ├── simulation/portfolio_executor.py   # PortfolioExecutor
 ├── simulation/funding_accrual.py      # начисление фандинга открытым позициям, общее для исполнителей
-├── simulation/pnl.py                  # PnLTracker, PnLSummary, функции Sharpe
+├── simulation/pnl.py                  # PnLTracker, PnLSummary, функции Sharpe (legacy-вердикты CSM и MR)
+├── simulation/metrics.py              # метрики вердикта funding/basis: дневная сетка, R_ann, MaxDD, HAC-t
 ├── orchestrator_portfolio.py          # живой portfolio-оркестратор
 └── cli.py
 
