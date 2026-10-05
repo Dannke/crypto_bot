@@ -43,7 +43,7 @@ docs/
     ├── funding-basis/
     │   ├── plan.md                    ← план шага cash-and-carry: задачи, риски, DoD
     │   └── cycle-1/
-    │       └── 1-hypothesis-and-decision-rule.md ← Task 0': гипотеза, decision rule, гейты — до измерений
+    │       └── 1-hypothesis-and-decision-rule.md ← Task 0': гипотеза, decision rule, гейты — до измерений; поправка 1
     ├── funding-carry/
     │   └── cycle-1/
     │       └── 1-hypothesis-and-decision-rule.md ← Task 0 межсекционного carry, отложен; F0–F5, D1, E1–E3
@@ -52,7 +52,7 @@ docs/
         ├── cycle-1/
         │   └── closure.md             ← итог линии v1–v4
         └── cycle-2/
-            ├── 1-signal-definition.md ← решение до измерений, поправки 1–2
+            ├── 1-signal-definition.md ← решение до измерений, поправки 1–3
             ├── 2-signal-validation.md ← гейты G1–G3, частота сигнала
             ├── 3-preregistration.md   ← замороженная регистрация
             └── 4-closure.md           ← вердикт
