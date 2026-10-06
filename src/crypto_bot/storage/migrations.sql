@@ -156,6 +156,9 @@ CREATE INDEX IF NOT EXISTS idx_funding_rates_symbol_time
     ON funding_rates (symbol, funding_time_ms);
 
 -- ---- Funding payments audit trail (R0.2) ------------------------------------
+-- amount — платёж позиции в расчёт: плюс — позиция заплатила, минус — получила;
+-- в эквити фандинг входит с обратным знаком. Одна строка на пару позиция ×
+-- расчёт — уникальный индекс uq_funding_payments_position_time создаёт _migrate_v11.
 CREATE TABLE IF NOT EXISTS funding_payments (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     position_id     INTEGER NOT NULL,
@@ -171,8 +174,11 @@ CREATE INDEX IF NOT EXISTS idx_funding_payments_time
     ON funding_payments (funding_time_ms);
 
 -- ---- schema version ---------------------------------------------------------
+-- Скрипт выполняется при каждом открытии БД, поэтому штампы ниже только
+-- поднимают версию: безусловный штамп опускал бы БД v11 обратно до 10, и
+-- schema_version() через раз отчитывался бы версией, которой у схемы нет.
 INSERT INTO schema_meta (key, value) VALUES ('schema_version', '8')
-    ON CONFLICT(key) DO UPDATE SET value='8';
+    ON CONFLICT(key) DO UPDATE SET value='8' WHERE CAST(value AS INTEGER) < 8;
 
 -- v9: add state table for orchestrator persistence (R8)
 CREATE TABLE IF NOT EXISTS state (
@@ -181,14 +187,19 @@ CREATE TABLE IF NOT EXISTS state (
     updated_at    INTEGER NOT NULL
 );
 INSERT INTO schema_meta (key, value) VALUES ('schema_version', '9')
-    ON CONFLICT(key) DO UPDATE SET value='9';
+    ON CONFLICT(key) DO UPDATE SET value='9' WHERE CAST(value AS INTEGER) < 9;
 
 -- v10: add 'reversion' and 'time_stop' to positions.closed_by CHECK constraint
 -- These are new close reasons from MeanReversionStrategy (reversion exit / time-stop)
 -- SQLite requires table recreation to modify CHECK constraints
 INSERT INTO schema_meta (key, value) VALUES ('schema_version', '10')
-    ON CONFLICT(key) DO UPDATE SET value='10';
+    ON CONFLICT(key) DO UPDATE SET value='10' WHERE CAST(value AS INTEGER) < 10;
 
 -- v10 migration: recreate positions table with updated CHECK constraint
 -- This runs only when upgrading from schema_version < 10
 -- The actual table recreation happens in _migrate_v10 in db.py
+
+-- v11: уникальность (position_id, funding_time_ms) в funding_payments. Здесь её нет
+-- намеренно: CREATE UNIQUE INDEX упал бы на первой же старой БД с дублями раньше,
+-- чем их можно удалить. Удаление дублей, индекс и штамп версии 11 — одна
+-- транзакция в _migrate_v11 в db.py.

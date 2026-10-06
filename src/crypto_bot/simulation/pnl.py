@@ -128,10 +128,29 @@ class PnLTracker:
         self.equity_history.append((datetime.now(tz=UTC), self.current_equity))
 
     def _update_equity(self) -> None:
-        """Update current equity based on closed positions."""
-        realized_pnl = sum(p.pnl_abs or 0.0 for p in self.positions if p.is_closed)
-        self.current_equity = self.initial_equity + realized_pnl
+        """Update current equity from the realized P&L (see ``realized_pnl``)."""
+        self.current_equity = self.initial_equity + self.realized_pnl()
         self.peak_equity = max(self.peak_equity, self.current_equity)
+
+    def realized_pnl(self) -> float:
+        """P&L of closed positions plus the funding credited to open ones.
+
+        Funding is cash exchanged at each settlement, so it is realized when it
+        is credited, not when the position closes. Leaving it out made the
+        equity of a funding strategy blind to its only income (F3).
+        """
+        closed = sum(p.pnl_abs or 0.0 for p in self.positions if p.is_closed)
+        return closed + sum(p.funding_abs for p in self.positions if p.is_open)
+
+    def mark_to_market(self, current_prices: dict[tuple[str, str], float]) -> float:
+        """Equity with open positions marked at ``current_prices``, funding included.
+
+        Recomputed from ``initial_equity`` on every call. ``mark_to_market_equity``
+        instead adds the unrealized P&L to ``current_equity``, which
+        ``record_equity`` overwrites with an already marked value, so between
+        closes it counts earlier price moves twice.
+        """
+        return self.initial_equity + self.realized_pnl() + self.unrealized_pnl(current_prices)
 
     def reset_daily_peak_if_day_changed(self, timestamp: datetime) -> None:
         """Reset daily_peak_equity at the start of a new trading day.

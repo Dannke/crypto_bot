@@ -25,9 +25,9 @@
 Test-сегмент 2025-11-24..2026-09-17 для mean reversion израсходован. Следующее направление —
 funding/basis, приоритет №4 из [`research/mean-reversion/plan.md`](research/mean-reversion/plan.md),
 раздел 9: cash-and-carry на BTC и ETH с моделью капитала К1 (решение владельца 2026-09-27), план
-шага — [`research/funding-basis/plan.md`](research/funding-basis/plan.md). До первого измерения
-нужно исправить учёт фандинга в бэктесте — F0–F5 в разделе 0.2 документа межсекционного carry —
-и загрузить данные.
+шага — [`research/funding-basis/plan.md`](research/funding-basis/plan.md). Учёт фандинга в
+бэктесте исправлен (Task 1 плана: F0–F5 в разделе 0.2 документа межсекционного carry); до
+первого измерения нужно загрузить данные.
 
 ## Структура
 

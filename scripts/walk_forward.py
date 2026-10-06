@@ -10,7 +10,8 @@ with the *same* config, candle source, execution (fees/slippage) and risk limits
 Supports 2-way (train/test) and 3-way (train/validation/test) splits.
 
 R0.5: Supports running with realistic Bybit perpetual costs:
-- Funding accrual (R0.2): funding rates applied on each bar close
+- Funding accrual (R0.2): each settlement from ``funding_rates`` in --db is
+  credited once to the positions held through it
 - Margin/leverage limits (R0.3): max_leverage + maintenance_margin_buffer
 - Instrument specs (R0.4): qtyStep rounding + minNotionalValue checks
 
@@ -45,7 +46,11 @@ from crypto_bot.config.settings import load_settings
 from crypto_bot.core.enums import Mode, StrategyType
 from crypto_bot.simulation.historical_source import HistoricalCandleSource
 from crypto_bot.simulation.market_constants import MARKET_QUOTE_VOLUME
-from crypto_bot.simulation.walk_forward import fetch_all_candles, run_walk_forward
+from crypto_bot.simulation.walk_forward import (
+    fetch_all_candles,
+    fetch_funding_source,
+    run_walk_forward,
+)
 
 
 def main() -> None:
@@ -177,6 +182,13 @@ def main() -> None:
     # R0.5: Funding options
     enable_funding = args.enable_funding and not args.disable_funding
 
+    # F0: every window runs on a fresh database, so funding comes from --db
+    funding_source = None
+    if enable_funding:
+        funding_source = fetch_funding_source(args.db, symbols)
+        counts = {sym: len(funding_source.events_up_to(2**63 - 1, sym)) for sym in symbols}
+        print(f"Funding events loaded from {args.db}: {counts}")
+
     result = run_walk_forward(
         config,
         symbols=symbols,
@@ -193,6 +205,7 @@ def main() -> None:
         validation_ratio=args.validation_split,
         start_ms=start_ms,
         end_ms=end_ms,
+        funding_source=funding_source,
     )
 
     def tf(ts: int) -> str:

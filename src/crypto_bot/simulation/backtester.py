@@ -90,6 +90,10 @@ class Backtester:
     equity recording are shared between both modes.
     """
 
+    # Funding history loaded before the window: the longest signal window over
+    # settlements in this project, 168 h (21 settlements at an 8 h interval).
+    FUNDING_LOOKBACK_MS = 168 * 3_600_000
+
     def __init__(
         self,
         config: Config,
@@ -106,6 +110,7 @@ class Backtester:
         strategy_mode: StrategyType | str = StrategyType.CANDIDATE,
         portfolio_limits: PortfolioRiskLimits | None = None,
         regime_config: RegimeConfig | None = None,
+        funding_source: HistoricalFundingSource | None = None,
     ) -> None:
         self._config = config
         self._symbols = [symbols] if isinstance(symbols, str) else symbols
@@ -163,8 +168,16 @@ class Backtester:
         self._repos = Repositories(self._db)
         self._builder: FeatureBuilder = builder_from_settings(settings)
         self._source = source or HistoricalCandleSource(self._repos.candles)
-        # Funding source for accruing funding payments on positions
-        self._funding_source = HistoricalFundingSource(FundingRepository(self._db))
+        # Фандинг — из переданного источника, как свечи из source: walk-forward
+        # строит его по БД данных. Без источника — БД прогона. Раньше вариант был
+        # один, БД прогона, а walk-forward создаёт её пустой: в окнах не было ни
+        # одного события фандинга (F0).
+        self._funding_given = funding_source is not None
+        self._funding_source = (
+            funding_source
+            if funding_source is not None
+            else HistoricalFundingSource(FundingRepository(self._db))
+        )
         # R0.4: Instrument cache for qty rounding and minNotional checks (built lazily)
         self._instrument_cache: InstrumentCache | None = None
         # R4: Regime config for portfolio fusion
@@ -250,24 +263,63 @@ class Backtester:
             if start_ms <= ts <= end_ms
         )
 
-    def _record_equity(self, as_of: int) -> None:
-        current_prices: dict[tuple[str, str], float] = {}
+    def _open_position_prices(self, as_of: int) -> dict[tuple[str, str], float]:
+        """Last closed bar's close for every open position, keyed by (symbol, timeframe)."""
+        prices: dict[tuple[str, str], float] = {}
         for pos in self._executor.tracker.positions:
             if not pos.is_open:
                 continue
             chk = self._source.slice(as_of, pos.symbol, pos.timeframe)
             if chk:
-                current_prices[(pos.symbol, pos.timeframe)] = chk[-1].close
-        tracker = self._executor.tracker
-        realized_pnl = sum(p.pnl_abs or 0.0 for p in tracker.positions if p.is_closed)
-        equity_now = tracker.initial_equity + realized_pnl + tracker.unrealized_pnl(current_prices)
-        tracker.record_equity(
+                prices[(pos.symbol, pos.timeframe)] = chk[-1].close
+        return prices
+
+    def _mark_to_market_equity(self, as_of: int) -> float:
+        """Equity at ``as_of``: open positions at the last closed bar, funding included."""
+        return self._executor.tracker.mark_to_market(self._open_position_prices(as_of))
+
+    def _record_equity(self, as_of: int) -> None:
+        equity_now = self._mark_to_market_equity(as_of)
+        self._executor.tracker.record_equity(
             datetime.fromtimestamp(as_of / 1000, tz=UTC), equity_now,
         )
         self._repos.equity.insert(
             currency=self._quote, equity=equity_now,
             drawdown_pct=0.0, mode=Mode.PAPER, ts_ms=as_of,
         )
+
+    def _load_funding(self) -> None:
+        """Load the run DB's funding events, ``FUNDING_LOOKBACK_MS`` before the window.
+
+        A source handed in by the caller is already loaded and is left as is.
+        """
+        if self._funding_given:
+            return
+        for sym in self._symbols:
+            try:
+                self._funding_source.load_from_repo(
+                    sym, self._start_ms - self.FUNDING_LOOKBACK_MS, self._end_ms,
+                )
+            except Exception as exc:
+                logger.info("bt: cannot load funding for %s — %s", sym, exc)
+
+    def _price_at(self, symbol: str, timeframe: str, ts_ms: int) -> float:
+        """Close of the bar ending at or before ``ts_ms`` — the price at a funding settlement."""
+        bars = self._source.slice(ts_ms, symbol, timeframe, limit=1)
+        if not bars:
+            raise ValueError(
+                f"no {symbol} {timeframe} bar closed by {ts_ms} to price a funding settlement"
+            )
+        return bars[-1].close
+
+    def _accrue_funding(self, as_of: int) -> None:
+        """Credit open positions with the settlements up to ``as_of``.
+
+        The first step of a tick, before the drawdown stop and any decision: a
+        position closed on the tick ``τ`` still receives the settlement ``τ``,
+        one opened on it does not, and the stop sees the funding.
+        """
+        self._executor.accrue_funding(self._funding_source, as_of, self._price_at)
 
     async def run_async(self) -> PnLSummary:
         """Execute the replay loop asynchronously."""
@@ -298,12 +350,7 @@ class Backtester:
                         except (AssertionError, Exception) as exc:
                             logger.info("bt: cannot load %s %s — %s", sym, tf, exc)
 
-            # Load funding data for all test symbols
-            for sym in self._symbols:
-                try:
-                    self._funding_source.load_from_repo(sym, self._start_ms, self._end_ms)
-                except Exception as exc:
-                    logger.info("bt: cannot load funding for %s — %s", sym, exc)
+            self._load_funding()
 
             # Unified clock: ticks on every bar close across ALL timeframes
             unified_clock = self._build_unified_clock(
@@ -314,6 +361,8 @@ class Backtester:
 
             bar_count = 0
             for as_of, fired_tfs in unified_clock:
+                # 0. Funding settlements up to this tick, before anything decides
+                self._accrue_funding(as_of)
                 try:
                     # 1. Build features for ALL symbols (needed for correlation),
                     #    but only pass fired TFs into the pipeline
@@ -379,14 +428,9 @@ class Backtester:
                 # timestamp.
                 tracker = self._executor.tracker
                 peak = tracker.peak_equity
-                mtm_prices: dict[tuple[str, str], float] = {}
-                for pos in tracker.positions:
-                    if pos.is_open:
-                        chk = self._source.slice(as_of, pos.symbol, pos.timeframe)
-                        if chk:
-                            mtm_prices[(pos.symbol, pos.timeframe)] = chk[-1].close
-                realized_pnl = sum(p.pnl_abs or 0.0 for p in tracker.positions if p.is_closed)
-                current = tracker.initial_equity + realized_pnl + tracker.unrealized_pnl(mtm_prices)
+                mtm_prices = self._open_position_prices(as_of)
+                # Тот же расчёт, что у записи эквити: фандинг внутри (F3)
+                current = tracker.mark_to_market(mtm_prices)
                 if (not self._emergency_halt_triggered and peak > 0 and current < peak):
                     dd_pct = (peak - current) / peak * 100.0
                     if dd_pct >= self._config.settings.risk.emergency_drawdown_pct:
@@ -436,10 +480,7 @@ class Backtester:
                             bar_timestamp_ms=as_of,
                         )
 
-                # Accrue funding for all open positions
-                self._executor.accrue_funding(self._funding_source, as_of)
-
-                # Record equity on every tick
+                # Record equity on every tick (funding was credited at step 0)
                 self._record_equity(as_of)
                 bar_count += 1
 
