@@ -365,6 +365,42 @@ def test_v11_runs_again_after_older_code_stamps_10(tmp_path) -> None:
         db.close()
 
 
+# --------------------------------------------------------------------------- цена в момент расчёта
+
+
+def _rising(n_bars: int, start: int = T0) -> list[Candle]:
+    """Бар, открытый в i-й час, закрывается по 100 + i; open, high и low у него свои."""
+    return [
+        Candle(timestamp=start + i * HOUR, open=99.5 + i, high=100.2 + i, low=99.3 + i,
+               close=100.0 + i, volume=1.0)
+        for i in range(n_bars)
+    ]
+
+
+def test_price_at_takes_the_close_of_the_bar_ending_at_the_settlement(tmp_path) -> None:
+    """У событий фандинга в БД mark_price пуст: номинал каждого расчёта задаёт _price_at."""
+    bt = _backtester(tmp_path, {"BTC/USDT": _rising(12)}, T0, T0 + 12 * HOUR)
+
+    # τ = 08:00 — бар 07:00–08:00 (107); 106 — бар раньше, 108 — бар, закрывшийся после τ
+    assert bt._price_at("BTC/USDT", "1h", T0 + 8 * HOUR) == 107.0
+    # бар 08:00–09:00 в 08:30 ещё не закрыт
+    assert bt._price_at("BTC/USDT", "1h", T0 + 8 * HOUR + HOUR // 2) == 107.0
+
+
+def test_settlement_without_mark_price_is_priced_by_that_bar(tmp_path, monkeypatch) -> None:
+    bt = _backtester(
+        tmp_path, {"BTC/USDT": _rising(12)}, T0, T0 + 12 * HOUR,
+        funding_source=_events("BTC/USDT", {T0 + 8 * HOUR: 0.0001}),
+    )
+    monkeypatch.setattr(bt._executor, "_costs", CompositeCostModel.bybit_perp_default())
+    position = _open(bt._executor, "BTC/USDT", Side.SHORT, 0.5, 100.0, T0 + HOUR)  # 50 монет по 100
+
+    bt._accrue_funding(T0 + 8 * HOUR)
+
+    # 50 × 107 × 0.0001; по цене входа было бы 0.5, по соседним барам — 0.53 и 0.54
+    assert position.funding_abs == pytest.approx(0.535)
+
+
 # --------------------------------------------------------------------------- F3, сверка, порядок тика
 
 
