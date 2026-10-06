@@ -66,6 +66,8 @@ class Position:
     mode: Mode = Mode.PAPER
     created_at: str = ""
     updated_at: str = ""
+    market: str = "linear"  # linear | spot (schema v12)
+    leg_group: str | None = None  # legs of one pair share it (schema v12)
 
     @property
     def opened_at(self):
@@ -121,6 +123,7 @@ class Trade:
     id: int = 0
     external_id: str | None = None
     created_at: str = ""
+    market: str = "linear"  # linear | spot (schema v12)
 
 
 @dataclass(frozen=True, slots=True)

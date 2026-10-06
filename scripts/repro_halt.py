@@ -30,7 +30,7 @@ def calendar_split(
 
 
 def fetch_candles(db_path: str, symbol: str, timeframe: str):
-    db = Database(db_path)
+    db = Database(db_path, read_only=True)  # market data is read, never migrated
     try:
         repo = CandleRepository(db)
         return repo.fetch_since(symbol, timeframe, since_ms=0)

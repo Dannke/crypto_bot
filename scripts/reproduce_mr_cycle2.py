@@ -37,9 +37,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import hashlib
 import logging
-import math
 import os
 import sqlite3
 import subprocess
@@ -119,21 +117,17 @@ class _NoLiveSpecs:
         raise RuntimeError("instrument snapshot did not load; refusing to fetch live specs")
 
 
-def pin_instrument_snapshot(config: Config) -> bool:
-    digest = hashlib.sha256(SPECS_SNAPSHOT.read_bytes()).hexdigest()
-    if digest != SPECS_SHA256:
-        print(f"FAIL: {SPECS_SNAPSHOT.name} sha256 {digest}, expected {SPECS_SHA256}")
-        return False
-    instruments.CACHE_FILE = SPECS_SNAPSHOT
-    instruments.CACHE_TTL_SECONDS = math.inf  # the snapshot never expires
+def load_instrument_snapshot() -> instruments.InstrumentCache | None:
+    """The cycle's snapshot, checked by sha256; the live cache and the API are never used."""
+    try:
+        cache = instruments.InstrumentCache.from_snapshot(SPECS_SNAPSHOT, expected_sha256=SPECS_SHA256)
+    except ValueError as exc:
+        print(f"FAIL: {exc}")
+        return None
     instruments.BybitInstrumentsClient = _NoLiveSpecs  # type: ignore[misc, assignment]
-    cache = instruments.InstrumentCache(config)
-    if not cache._load_from_disk():
-        print(f"FAIL: {SPECS_SNAPSHOT.name} did not load")
-        return False
     tradable = {sym: cache.is_tradable_linear_perpetual(sym) for sym in SYMBOLS}
     print(f"instrument specs: {SPECS_SNAPSHOT.name}, sha256 ok, tradable {tradable}")
-    return all(tradable.values())
+    return cache if all(tradable.values()) else None
 
 
 def load_config() -> Config:
@@ -144,7 +138,7 @@ def load_config() -> Config:
     return Config(settings=settings, env=config_obj.env)
 
 
-def run_windows(config: Config, db_dir: Path) -> None:
+def run_windows(config: Config, db_dir: Path, instrument_cache: instruments.InstrumentCache) -> None:
     """Validation and test windows exactly as run_walk_forward builds them."""
     source = HistoricalCandleSource()
     for sym, candles in fetch_all_candles(str(DATA_DB), SYMBOLS, TIMEFRAME).items():
@@ -169,6 +163,7 @@ def run_windows(config: Config, db_dir: Path) -> None:
             db_path=str(db_dir / f"{name}.db"),
             enable_funding=True,  # bybit_perp_default(), the production cost model
             funding_source=HistoricalFundingSource(),  # no events, as the production windows saw
+            instrument_cache=instrument_cache,
         ))
         minutes = (datetime.now(tz=UTC) - began).total_seconds() / 60
         print(f"{name}: {fmt(start_ms)} .. {fmt(end_ms)} replayed in {minutes:.1f} min")
@@ -275,9 +270,12 @@ def main() -> int:
     config = load_config()
     # load_settings sets up the project logger at INFO: a line per tick otherwise
     logging.getLogger("crypto_bot").setLevel(logging.WARNING)
-    if not check_config_snapshot() or not pin_instrument_snapshot(config):
+    if not check_config_snapshot():
         return 1
-    run_windows(config, db_dir)
+    instrument_cache = load_instrument_snapshot()
+    if instrument_cache is None:
+        return 1
+    run_windows(config, db_dir, instrument_cache)
     tables_ok = compare_databases(db_dir)
     decision_ok = check_decision_rule(db_dir)
     verdict = "REPRODUCED" if tables_ok and decision_ok else "NOT REPRODUCED"

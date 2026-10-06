@@ -19,18 +19,48 @@ from .models import (
 class Database:
     """SQLite-backed storage with auto-migration."""
 
-    def __init__(self, db_path: str | Path = "data/crypto_bot.db") -> None:
+    def __init__(self, db_path: str | Path = "data/crypto_bot.db", *, read_only: bool = False) -> None:
+        """Open a database and migrate it, or, with ``read_only``, open it as it is.
+
+        Frozen market data — ``data/crypto_bot.db`` at schema v11 — is read through
+        a read-only connection: migrating it would rewrite it (Task 0' amendment 2
+        of the funding/basis cycle).
+        """
         self._path = Path(db_path)
-        self._path.parent.mkdir(parents=True, exist_ok=True)
+        self._read_only = read_only
         try:
+            if read_only:
+                if not self._path.exists():
+                    raise StorageError(f"cannot open database {self._path}: no such file")
+                self._conn = sqlite3.connect(
+                    f"{self._path.resolve().as_uri()}?mode=ro", uri=True, check_same_thread=False,
+                )
+                self._conn.row_factory = sqlite3.Row
+                return
+            self._path.parent.mkdir(parents=True, exist_ok=True)
             # check_same_thread=False: persisted to from the orchestrator's thread.
             self._conn = sqlite3.connect(self._path, check_same_thread=False)
             self._conn.row_factory = sqlite3.Row
-            self._conn.execute("PRAGMA foreign_keys = ON;")
-            self._conn.execute("PRAGMA journal_mode = WAL;")
         except sqlite3.Error as exc:
             raise StorageError(f"cannot open database {self._path}: {exc}") from exc
-        self._migrate()
+        try:
+            # Version and frozen market data are checked before anything can write:
+            # even switching the journal to WAL rewrites the file header.
+            self._schema_version_at_open = self._read_schema_version()
+            self._refuse_frozen_market_data()
+            self._conn.execute("PRAGMA foreign_keys = ON;")
+            self._conn.execute("PRAGMA journal_mode = WAL;")
+            self._migrate()
+        except sqlite3.Error as exc:
+            self._conn.close()
+            raise StorageError(f"cannot open database {self._path}: {exc}") from exc
+        except BaseException:
+            self._conn.close()
+            raise
+
+    @property
+    def read_only(self) -> bool:
+        return self._read_only
 
     def _read_schema_version(self) -> int:
         """Текущая версия схемы, 0 если БД ещё пуста."""
@@ -48,7 +78,7 @@ class Database:
         # перечитывая версию после executescript, видела уже финальное значение
         # и выходила рано — вся цепочка v2..v10 не выполнялась никогда, а БД
         # при этом отчитывалась как мигрированная.
-        self._schema_version_at_open = self._read_schema_version()
+        # _schema_version_at_open is read in __init__, before the journal switch
         try:
             sql = _MIGRATIONS_FILE.read_text(encoding="utf-8")
             self._conn.executescript(sql)
@@ -76,6 +106,8 @@ class Database:
         self._migrate_v10()
         # v11: one funding_payments row per position and settlement (F5)
         self._migrate_v11()
+        # v12: market as an attribute of positions, trades and candles; leg groups
+        self._migrate_v12()
 
     def _migrate_v2(self) -> None:
         if self._schema_version_at_open >= 2:
@@ -354,6 +386,93 @@ class Database:
                 self._conn.rollback()
             raise StorageError(f"migration v11 (funding_payments uniqueness) failed: {exc}") from exc
 
+    def _columns(self, table: str) -> set[str]:
+        return {row["name"] for row in self._conn.execute(f"PRAGMA table_info({table})")}
+
+    def _refuse_frozen_market_data(self) -> None:
+        """Refuse to migrate candles stored before v12: that is frozen market data.
+
+        Checked before ``migrations.sql`` runs, so nothing is written. Such a
+        database is opened with ``read_only=True``; v12 never rebuilds a
+        populated candles table.
+        """
+        columns = self._columns("candles")  # empty: a new database, no table yet
+        if self._schema_version_at_open >= 12 or not columns or "market" in columns:
+            return
+        if self._conn.execute("SELECT EXISTS (SELECT 1 FROM candles)").fetchone()[0]:
+            raise StorageError(
+                f"{self._path}: candles stored at schema {self._schema_version_at_open}, before "
+                "markets; frozen market data is opened with Database(path, read_only=True), "
+                "not migrated (funding/basis Task 0' amendment 2)"
+            )
+
+    def _migrate_v12(self) -> None:
+        if self._schema_version_at_open >= 12:
+            return
+        # Рынок — атрибут инструмента, а не стратегии (план funding/basis, Task 3):
+        # лонг спот и шорт перпетуала одной монеты — две позиции одной книги.
+        # - positions, trades: market ('linear' | 'spot'). Всё, что открывалось до v12,
+        #   — линейные перпетуалы: исполнитель допускал только LinearPerpetual;
+        # - positions.leg_group: ноги одной пары; NULL — позиция вне группы;
+        # - правило «одна открытая позиция на инструмент» теперь в БД: уникальный
+        #   индекс по (symbol, timeframe, market) среди открытых;
+        # - candles: market входит в первичный ключ, чтобы спот- и перп-бары одного
+        #   символа и времени хранились рядом; значения по умолчанию нет — запись без
+        #   рынка падает. Таблица пересоздаётся только пустой: свечи до v12 — замороженные
+        #   рыночные данные, их открывают только на чтение (поправка 2 Task 0'
+        #   funding/basis). 'unverified' — ряд устаревших загрузчиков ccxt, настроенных
+        #   на спот (п. 10 бэклога): метку 'spot' он получит только скриптом сверки с API.
+        #
+        # Идемпотентна, как v11: код до v12 штампует версию ниже, и общая БД проходит
+        # её повторно, — поэтому каждый шаг проверяет, не сделан ли он уже. Всё — одна
+        # транзакция: при сбое БД остаётся на прежней версии.
+        steps: list[str] = []
+        if "market" not in self._columns("positions"):
+            steps.append(
+                "ALTER TABLE positions ADD COLUMN market TEXT NOT NULL DEFAULT 'linear' "
+                "CHECK (market IN ('linear','spot'));"
+            )
+        if "leg_group" not in self._columns("positions"):
+            steps.append("ALTER TABLE positions ADD COLUMN leg_group TEXT;")
+        if "market" not in self._columns("trades"):
+            steps.append(
+                "ALTER TABLE trades ADD COLUMN market TEXT NOT NULL DEFAULT 'linear' "
+                "CHECK (market IN ('linear','spot'));"
+            )
+        steps.append(
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_positions_open_instrument "
+            "ON positions (symbol, timeframe, market) WHERE status = 'open';"
+        )
+        if "market" not in self._columns("candles"):
+            # Empty here — _refuse_frozen_market_data stops a populated one. No default:
+            # an insert that does not name the market — old code — fails loudly.
+            steps.append("""
+                DROP TABLE candles;
+                CREATE TABLE candles (
+                    symbol    TEXT    NOT NULL,
+                    timeframe TEXT    NOT NULL,
+                    market    TEXT    NOT NULL CHECK (market IN ('spot','linear','unverified')),
+                    ts_ms     INTEGER NOT NULL,
+                    open      REAL    NOT NULL,
+                    high      REAL    NOT NULL,
+                    low       REAL    NOT NULL,
+                    close     REAL    NOT NULL,
+                    volume    REAL    NOT NULL,
+                    PRIMARY KEY (symbol, timeframe, market, ts_ms)
+                );
+                CREATE INDEX IF NOT EXISTS idx_candles_symbol_tf_ts ON candles (symbol, timeframe, ts_ms);
+            """)
+        steps.append(
+            "INSERT INTO schema_meta (key, value) VALUES ('schema_version', '12') "
+            "ON CONFLICT(key) DO UPDATE SET value='12';"
+        )
+        try:
+            self._conn.executescript("BEGIN;\n" + "\n".join(steps) + "\nCOMMIT;")
+        except sqlite3.Error as exc:
+            if self._conn.in_transaction:
+                self._conn.rollback()
+            raise StorageError(f"migration v12 (market, leg_group) failed: {exc}") from exc
+
     @property
     def conn(self) -> sqlite3.Connection:
         return self._conn
@@ -577,15 +696,54 @@ class Database:
 
 
 class CandleRepository:
-    """Read-only access to candles for backtesting."""
+    """Candles, one series per ``(symbol, timeframe, market)``.
+
+    A write always names the market. A read names it, or the pair must hold a
+    single series — two markets read as one would mix spot and perpetual prices
+    silently. A database before v12 stores no market; its one series is read as is.
+    """
+
+    MARKETS = ("spot", "linear", "unverified")
 
     def __init__(self, db: Database):
         self._db = db
+        self._has_market: bool | None = None
 
-    _SELECT = (
-        "SELECT symbol, timeframe, ts_ms as timestamp, open, high, low, close, volume "
-        "FROM candles WHERE symbol=? AND timeframe=? AND ts_ms >= ? "
-    )
+    def _market_column(self) -> bool:
+        if self._has_market is None:
+            columns = {row[1] for row in self._db._conn.execute("PRAGMA table_info(candles)")}
+            self._has_market = "market" in columns
+        return self._has_market
+
+    def _where(self, symbol: str, timeframe: str, market: str | None) -> tuple[str, list]:
+        """The WHERE clause selecting one series of the pair."""
+        if not self._market_column():
+            if market is not None:
+                raise StorageError(
+                    f"{self._db.path}: candles before schema v12 store no market; "
+                    f"cannot read {market!r}"
+                )
+            return "symbol=? AND timeframe=?", [symbol, timeframe]
+        if market is None:
+            stored = [
+                row[0] for row in self._db._conn.execute(
+                    "SELECT DISTINCT market FROM candles WHERE symbol=? AND timeframe=?",
+                    (symbol, timeframe),
+                )
+            ]
+            if len(stored) > 1:
+                raise StorageError(
+                    f"candles of {symbol} {timeframe} are stored for markets {sorted(stored)}: "
+                    "name the market to read"
+                )
+            if not stored:
+                return "symbol=? AND timeframe=?", [symbol, timeframe]
+            market = stored[0]
+        return "symbol=? AND timeframe=? AND market=?", [symbol, timeframe, market]
+
+    def _check_market(self, market: str) -> None:
+        if market not in self.MARKETS:
+            raise ValueError(f"market must be one of {self.MARKETS}, got {market!r}")
 
     def fetch(
         self,
@@ -593,6 +751,7 @@ class CandleRepository:
         timeframe: str,
         since_ms: int = 0,
         limit: int = 400,
+        market: str | None = None,
     ) -> list[Candle]:
         """Последние ``limit`` свечей начиная с ``since_ms``, в порядке возрастания.
 
@@ -603,10 +762,12 @@ class CandleRepository:
         Берутся именно ПОСЛЕДНИЕ свечи (ORDER BY DESC + разворот), а не первые:
         фиду нужен свежий хвост истории, а не её начало.
         """
+        where, params = self._where(symbol, timeframe, market)
         limit_val = max(1, min(int(limit), policy.MAX_CANDLES_LOOKBACK))
         rows = self._db._conn.execute(
-            self._SELECT + "ORDER BY ts_ms DESC LIMIT ?",
-            (symbol, timeframe, since_ms, limit_val),
+            "SELECT symbol, timeframe, ts_ms as timestamp, open, high, low, close, volume "
+            f"FROM candles WHERE {where} AND ts_ms >= ? ORDER BY ts_ms DESC LIMIT ?",
+            (*params, since_ms, limit_val),
         ).fetchall()
         return [Candle(**row) for row in reversed(rows)]
 
@@ -616,6 +777,7 @@ class CandleRepository:
         timeframe: str,
         since_ms: int,
         limit: int | None = None,
+        market: str | None = None,
     ) -> list[Candle]:
         """ВСЕ свечи начиная с ``since_ms``, в порядке возрастания.
 
@@ -629,16 +791,16 @@ class CandleRepository:
         первые 400 баров вместо всей истории. Бэктест на реальных данных читал
         ~1.7% запрошенного и почти всегда промахивался мимо нужного окна.
         """
-        if limit is None:
-            rows = self._db._conn.execute(
-                self._SELECT + "ORDER BY ts_ms ASC",
-                (symbol, timeframe, since_ms),
-            ).fetchall()
-        else:
-            rows = self._db._conn.execute(
-                self._SELECT + "ORDER BY ts_ms ASC LIMIT ?",
-                (symbol, timeframe, since_ms, max(1, int(limit))),
-            ).fetchall()
+        where, params = self._where(symbol, timeframe, market)
+        sql = (
+            "SELECT symbol, timeframe, ts_ms as timestamp, open, high, low, close, volume "
+            f"FROM candles WHERE {where} AND ts_ms >= ? ORDER BY ts_ms ASC"
+        )
+        args: list = [*params, since_ms]
+        if limit is not None:
+            sql += " LIMIT ?"
+            args.append(max(1, int(limit)))
+        rows = self._db._conn.execute(sql, args).fetchall()
         return [Candle(**row) for row in rows]
 
     def upsert_many(
@@ -646,43 +808,40 @@ class CandleRepository:
         symbol: str,
         timeframe: str,
         candles: list[Candle],
+        *,
+        market: str,
     ) -> int:
-        """Insert many candles, ignoring conflicts (ON CONFLICT DO NOTHING)."""
+        """Insert many candles of one market, ignoring conflicts (ON CONFLICT DO NOTHING)."""
+        self._check_market(market)
         if not candles:
             return 0
         with self._db._conn:
             self._db._conn.executemany(
                 """INSERT OR IGNORE INTO candles
-                   (symbol, timeframe, ts_ms, open, high, low, close, volume)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-                [(symbol, timeframe, c.timestamp, c.open, c.high, c.low, c.close, c.volume)
+                   (symbol, timeframe, market, ts_ms, open, high, low, close, volume)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                [(symbol, timeframe, market, c.timestamp, c.open, c.high, c.low, c.close, c.volume)
                  for c in candles],
             )
         return len(candles)
 
-    def latest_ts(self, symbol: str, timeframe: str) -> int | None:
+    def latest_ts(self, symbol: str, timeframe: str, market: str | None = None) -> int | None:
         """Get the latest candle timestamp for a symbol/timeframe."""
-        row = self._db._conn.execute(
-            "SELECT MAX(ts_ms) FROM candles WHERE symbol=? AND timeframe=?",
-            (symbol, timeframe),
-        ).fetchone()
+        where, params = self._where(symbol, timeframe, market)
+        row = self._db._conn.execute(f"SELECT MAX(ts_ms) FROM candles WHERE {where}", params).fetchone()
         return row[0] if row and row[0] is not None else None
 
-    def latest_close(self, symbol: str, timeframe: str) -> float | None:
+    def latest_close(self, symbol: str, timeframe: str, market: str | None = None) -> float | None:
         """Get the latest candle close price for a symbol/timeframe."""
+        where, params = self._where(symbol, timeframe, market)
         row = self._db._conn.execute(
-            "SELECT close FROM candles WHERE symbol=? AND timeframe=? ORDER BY ts_ms DESC LIMIT 1",
-            (symbol, timeframe),
+            f"SELECT close FROM candles WHERE {where} ORDER BY ts_ms DESC LIMIT 1", params,
         ).fetchone()
         return row[0] if row else None
 
-    async def latest_ts_async(self, symbol: str, timeframe: str) -> int | None:
+    async def latest_ts_async(self, symbol: str, timeframe: str, market: str | None = None) -> int | None:
         """Get the latest candle timestamp for a symbol/timeframe."""
-        row = self._db._conn.execute(
-            "SELECT MAX(ts_ms) FROM candles WHERE symbol=? AND timeframe=?",
-            (symbol, timeframe),
-        ).fetchone()
-        return row[0] if row and row[0] is not None else None
+        return self.latest_ts(symbol, timeframe, market)
 
     async def fetch_async(
         self,
@@ -690,6 +849,7 @@ class CandleRepository:
         timeframe: str,
         limit: int = 400,
         since_ms: int = 0,
+        market: str | None = None,
     ) -> list[Candle]:
         """Async-обёртка над :meth:`fetch` через run_in_executor.
 
@@ -698,7 +858,7 @@ class CandleRepository:
         """
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(
-            None, lambda: self.fetch(symbol, timeframe, since_ms, limit)
+            None, lambda: self.fetch(symbol, timeframe, since_ms, limit, market)
         )
 
     async def upsert_many_async(
@@ -706,16 +866,19 @@ class CandleRepository:
         symbol: str,
         timeframe: str,
         candles: list[Candle],
+        *,
+        market: str,
     ) -> int:
-        """Insert or replace many candles asynchronously."""
+        """Insert or replace many candles of one market asynchronously."""
+        self._check_market(market)
         if not candles:
             return 0
         with self._db._conn:
             self._db._conn.executemany(
                 """INSERT OR REPLACE INTO candles
-                   (symbol, timeframe, ts_ms, open, high, low, close, volume)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-                [(symbol, timeframe, c.timestamp, c.open, c.high, c.low, c.close, c.volume)
+                   (symbol, timeframe, market, ts_ms, open, high, low, close, volume)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                [(symbol, timeframe, market, c.timestamp, c.open, c.high, c.low, c.close, c.volume)
                  for c in candles],
             )
         return len(candles)
@@ -773,6 +936,8 @@ class PositionRepository:
         mode: Mode,
         opened_at_ms: int | None = None,
         status: TradeStatus = TradeStatus.OPEN,
+        market: str = "linear",
+        leg_group: str | None = None,
     ) -> int:
         import time
         if opened_at_ms is None:
@@ -780,8 +945,9 @@ class PositionRepository:
         with self._db._conn:
             cur = self._db._conn.execute(
                 """INSERT INTO positions
-                   (symbol, timeframe, side, size, entry_price, stop, take, status, opened_at_ms, mode)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   (symbol, timeframe, side, size, entry_price, stop, take, status, opened_at_ms, mode,
+                    market, leg_group)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     symbol,
                     timeframe,
@@ -793,6 +959,8 @@ class PositionRepository:
                     status.value,
                     opened_at_ms,
                     mode.value,
+                    market,
+                    leg_group,
                 ),
             )
         return cur.lastrowid
@@ -921,14 +1089,16 @@ class TradeRepository:
         mode: Mode,
         status: OrderStatus = OrderStatus.FILLED,
         external_id: str | None = None,
+        market: str = "linear",
     ) -> int:
         import time
         ts_ms = int(time.time() * 1000)
         with self._db._conn:
             cur = self._db._conn.execute(
                 """INSERT INTO trades
-                   (position_id, symbol, side, order_type, size, price, status, ts_ms, mode, external_id)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   (position_id, symbol, side, order_type, size, price, status, ts_ms, mode, external_id,
+                    market)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     position_id,
                     symbol,
@@ -940,6 +1110,7 @@ class TradeRepository:
                     ts_ms,
                     mode.value,
                     external_id,
+                    market,
                 ),
             )
         return cur.lastrowid

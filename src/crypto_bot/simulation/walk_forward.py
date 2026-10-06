@@ -33,6 +33,7 @@ from ..core.enums import StrategyType
 from ..core.logging_setup import get_logger
 from ..core.types import Candle
 from ..data.funding import FundingRepository, HistoricalFundingSource
+from ..data.instruments import InstrumentCache
 from ..execution.costs import CompositeCostModel
 from ..features.context import SymbolMarketContext
 from ..portfolio import (
@@ -198,12 +199,14 @@ async def _run_single_window(
     max_leverage: float = 10.0,
     maintenance_margin_buffer_pct: float = 0.1,
     funding_source: HistoricalFundingSource | None = None,
+    instrument_cache: InstrumentCache | None = None,
 ) -> PnLSummary:
     """Run a single backtest window.
 
     ``funding_source`` carries the funding history from the data database; the
     window's own database is created empty, so without it the backtester would
-    see no funding at all (F0).
+    see no funding at all (F0). ``instrument_cache`` — a snapshot of instrument
+    specs; without one the backtester builds the live 24-hour cache.
     """
     from ..storage.db import Database
 
@@ -228,6 +231,7 @@ async def _run_single_window(
         regime_config=regime_config,
         market_map=market_map,
         funding_source=funding_source,
+        instrument_cache=instrument_cache,
     )
     # R0.5: Apply cost model (funding-aware, legacy, or maker-only for MR post-only)
     strategy_name = getattr(config.settings.portfolio, 'strategy_name', None)
@@ -271,6 +275,8 @@ def run_walk_forward(
     end_ms: int | None = None,
     # Funding history from the data database, handed to every window (F0)
     funding_source: HistoricalFundingSource | None = None,
+    # Instrument specs for every window: a snapshot pins the admitted universe
+    instrument_cache: InstrumentCache | None = None,
 ) -> WalkForwardResult:
     """Run walk-forward analysis on calendar windows (2-way or 3-way split).
 
@@ -297,6 +303,9 @@ def run_walk_forward(
         funding_source: Funding history for the windows, e.g. ``fetch_funding_source``
                 over the data database. Each window runs on a fresh database of its
                 own, so without it no window sees any funding.
+        instrument_cache: Instrument specs for every window, e.g.
+                ``InstrumentCache.from_snapshot``; without it each window builds
+                the live 24-hour cache.
 
     Returns:
         WalkForwardResult with train/validation/test summaries and overfit hint.
@@ -358,6 +367,7 @@ def run_walk_forward(
         max_leverage=max_leverage,
         maintenance_margin_buffer_pct=maintenance_margin_buffer_pct,
         funding_source=funding_source,
+        instrument_cache=instrument_cache,
     ))
 
     # Run validation window (3-way only)
@@ -375,6 +385,7 @@ def run_walk_forward(
             max_leverage=max_leverage,
             maintenance_margin_buffer_pct=maintenance_margin_buffer_pct,
             funding_source=funding_source,
+            instrument_cache=instrument_cache,
         ))
 
     # Run test window
@@ -390,6 +401,7 @@ def run_walk_forward(
         max_leverage=max_leverage,
         maintenance_margin_buffer_pct=maintenance_margin_buffer_pct,
         funding_source=funding_source,
+        instrument_cache=instrument_cache,
     ))
 
     # Get strategy name
@@ -426,9 +438,10 @@ def fetch_funding_source(db_path: str, symbols: list[str]) -> HistoricalFundingS
     Walk-forward windows run on fresh databases of their own, so the funding
     history has to come from the data database, like the candles (F0). The
     source filters by settlement time on every read, so loading all of it
-    leaks nothing into a window.
+    leaks nothing into a window. The database is opened read-only: market
+    data is read, never migrated (data/crypto_bot.db stays at schema v11).
     """
-    db = Database(db_path)
+    db = Database(db_path, read_only=True)
     try:
         repo = FundingRepository(db)
         source = HistoricalFundingSource()
@@ -440,10 +453,10 @@ def fetch_funding_source(db_path: str, symbols: list[str]) -> HistoricalFundingS
 
 
 def fetch_all_candles(db_path: str, symbols: list[str], timeframe: str) -> dict[str, list[Candle]]:
-    """Fetch all candles for multiple symbols from the database."""
+    """Fetch all candles for multiple symbols from the database, opened read-only."""
     from ..storage.db import CandleRepository
 
-    db = Database(db_path)
+    db = Database(db_path, read_only=True)
     try:
         repo = CandleRepository(db)
         result = {}

@@ -165,8 +165,11 @@ class PortfolioExecutor:
                 False, f"position already open for {intent.symbol} {tf}", intent.symbol
             )
 
-        # R0.4: Fail closed for symbols without instrument specs
-        if self._instrument_cache is not None and not self._instrument_cache.is_tradable_linear_perpetual(intent.symbol):
+        # R0.4: Fail closed for symbols without instrument specs, and before an
+        # instrument's launch: a spec is today's, the tick may be years earlier
+        if self._instrument_cache is not None and not self._instrument_cache.is_tradable_linear_perpetual(
+            intent.symbol, at_ms=timestamp_ms,
+        ):
             self._rejected_intents.append(intent)
             return PortfolioExecutionResult(
                 False, f"symbol {intent.symbol} not tradable or missing instrument spec", intent.symbol

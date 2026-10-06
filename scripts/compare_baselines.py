@@ -45,7 +45,7 @@ from crypto_bot.storage.db import CandleRepository, Database
 
 
 def _fetch_candles(db_path: str, symbol: str, timeframe: str) -> list:
-    db = Database(db_path)
+    db = Database(db_path, read_only=True)  # market data is read, never migrated
     try:
         return CandleRepository(db).fetch_since(symbol, timeframe, since_ms=0)
     finally:

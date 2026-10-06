@@ -52,7 +52,7 @@ def _ms_to_iso(ms: int) -> str:
 
 async def _load_candles_from_db(db_path: str, symbols: list[str], timeframe: str, start_ms: int, end_ms: int) -> dict[str, list]:
     """Load candles from local SQLite DB."""
-    db = Database(db_path)
+    db = Database(db_path, read_only=True)  # market data is read, never migrated
     repo = CandleRepository(db)
     source = HistoricalCandleSource(repo)
 

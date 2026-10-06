@@ -94,7 +94,7 @@ def _backtester(tmp_path, candles: dict[str, list[Candle]], start: int, end: int
 class _PermissiveInstruments:
     """Кэш спецификаций без обращения к диску и API: любой символ торгуется."""
 
-    def is_tradable_linear_perpetual(self, symbol: str) -> bool:
+    def is_tradable_linear_perpetual(self, symbol: str, at_ms: int | None = None) -> bool:
         return True
 
     def round_qty_down(self, symbol: str, qty: float) -> float:
@@ -331,7 +331,7 @@ def test_v11_collapses_duplicates_left_by_repeated_accrual(tmp_path) -> None:
 
     db = Database(path)
     try:
-        assert db.schema_version() == "11"
+        assert db.schema_version() == "12"  # v11, затем v12
         assert _payments(db) == [(T0 + 8 * HOUR, 0.01), (T0 + 16 * HOUR, -0.02)]
         with pytest.raises(sqlite3.IntegrityError):
             db.conn.execute(INSERT_PAYMENT, (position_id, T0 + 8 * HOUR, 0.01))
@@ -357,7 +357,7 @@ def test_v11_runs_again_after_older_code_stamps_10(tmp_path) -> None:
 
     db = Database(path)
     try:
-        assert db.schema_version() == "11"
+        assert db.schema_version() == "12"  # v11, затем v12
         assert _payments(db) == [(T0 + 8 * HOUR, -0.5)]
         with pytest.raises(sqlite3.IntegrityError):
             db.conn.execute(INSERT_PAYMENT, (position_id, T0 + 8 * HOUR, -0.5))

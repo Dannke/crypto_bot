@@ -76,7 +76,9 @@ def fetch_and_store_candles(
     
     if candles_list:
         repo = CandleRepository(db)
-        repo.upsert_many(symbol, timeframe, candles_list)
+        # ccxt here is configured for spot (backlog item 10), but the series is not checked
+        # against the spot API: it is stored as 'unverified', like the archive
+        repo.upsert_many(symbol, timeframe, candles_list, market="unverified")
         stored = len(candles_list)
         print(f"  Stored {stored} candles for {symbol}")
         return stored

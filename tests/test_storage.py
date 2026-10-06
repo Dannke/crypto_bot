@@ -33,13 +33,13 @@ def repos(tmp_path):
 # Schema / migration
 # --------------------------------------------------------------------------- #
 def test_schema_version_is_one(repos):
-    assert repos.db.schema_version() == "11"
+    assert repos.db.schema_version() == "12"
 
 
 def test_migration_is_idempotent(repos):
     # Re-running migrate via a fresh Database on the same file must not error.
     db2 = Database(db_path=repos.db.db_path)
-    assert db2.schema_version() == "11"
+    assert db2.schema_version() == "12"
     db2.close()
 
 
@@ -49,7 +49,7 @@ def test_migration_is_idempotent(repos):
 def test_candle_upsert_and_fetch(repos):
     c1 = Candle(timestamp=1000, open=1, high=2, low=0.5, close=1.5, volume=10)
     c2 = Candle(timestamp=2000, open=1.5, high=3, low=1.4, close=2.5, volume=20)
-    n = repos.candles.upsert_many("BTC/USDT", "15m", [c1, c2])
+    n = repos.candles.upsert_many("BTC/USDT", "15m", [c1, c2], market="spot")
     assert n == 2
 
     fetched = repos.candles.fetch("BTC/USDT", "15m", limit=10)
@@ -61,10 +61,10 @@ def test_candle_upsert_and_fetch(repos):
 
 def test_candle_upsert_is_idempotent(repos):
     c = Candle(timestamp=1000, open=1, high=2, low=0.5, close=1.5, volume=10)
-    repos.candles.upsert_many("BTC/USDT", "15m", [c])
+    repos.candles.upsert_many("BTC/USDT", "15m", [c], market="spot")
     # Second insert with same key — ON CONFLICT DO NOTHING keeps original values
     c_updated = Candle(timestamp=1000, open=1, high=2, low=0.5, close=9.9, volume=99)
-    repos.candles.upsert_many("BTC/USDT", "15m", [c_updated])
+    repos.candles.upsert_many("BTC/USDT", "15m", [c_updated], market="spot")
     fetched = repos.candles.fetch("BTC/USDT", "15m", limit=10)
     assert len(fetched) == 1
     assert fetched[0].close == 1.5   # original value preserved

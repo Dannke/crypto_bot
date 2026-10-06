@@ -111,6 +111,7 @@ class Backtester:
         portfolio_limits: PortfolioRiskLimits | None = None,
         regime_config: RegimeConfig | None = None,
         funding_source: HistoricalFundingSource | None = None,
+        instrument_cache: InstrumentCache | None = None,
     ) -> None:
         self._config = config
         self._symbols = [symbols] if isinstance(symbols, str) else symbols
@@ -178,8 +179,11 @@ class Backtester:
             if funding_source is not None
             else HistoricalFundingSource(FundingRepository(self._db))
         )
-        # R0.4: Instrument cache for qty rounding and minNotional checks (built lazily)
-        self._instrument_cache: InstrumentCache | None = None
+        # R0.4: Instrument cache for qty rounding, minNotional and launch checks.
+        # A research run passes a snapshot (InstrumentCache.from_snapshot); without
+        # one the live 24-hour cache is built on run, and the admitted universe
+        # depends on the day of the run (backlog item 3).
+        self._instrument_cache: InstrumentCache | None = instrument_cache
         # R4: Regime config for portfolio fusion
         self._regime_config = regime_config
 
@@ -334,9 +338,14 @@ class Backtester:
             for sym in self._symbols:
                 self._repos.positions.delete_for_symbol(sym)
 
-            # R0.4: Build instrument cache for portfolio mode
+            # R0.4: Instrument cache for portfolio mode — the one passed in, else the live one
             if self._mode == StrategyType.PORTFOLIO:
-                self._instrument_cache = await build_instrument_cache(self._config)
+                if self._instrument_cache is None:
+                    logger.warning(
+                        "bt: instrument specs from the live 24 h cache — the admitted "
+                        "universe depends on the day of the run; pass a snapshot"
+                    )
+                    self._instrument_cache = await build_instrument_cache(self._config)
                 # Set it on the executor
                 self._executor._instrument_cache = self._instrument_cache
 

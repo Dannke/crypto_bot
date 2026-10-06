@@ -49,7 +49,7 @@ def _candles(n: int = N_CANDLES) -> list[Candle]:
 def repos(tmp_path):
     db = Database(tmp_path / "candle_reads.db")
     repositories = Repositories(db)
-    repositories.candles.upsert_many(SYMBOL, TIMEFRAME, _candles())
+    repositories.candles.upsert_many(SYMBOL, TIMEFRAME, _candles(), market="spot")
     yield repositories
     db.close()
 

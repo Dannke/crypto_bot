@@ -368,7 +368,9 @@ class Feed:
                 return tf, []
             
             if fetched_new and self._candle_repo:
-                await self._candle_repo.upsert_many_async(symbol, tf, fetched_new)
+                # ccxt here is configured for spot (backlog item 10), but the series is not checked
+                # against the spot API: it is stored as 'unverified', like the archive
+                await self._candle_repo.upsert_many_async(symbol, tf, fetched_new, market="unverified")
             
             new_suffix = f" [+{len(fetched_new)}]" if fetched_new else ""
             _log.info(

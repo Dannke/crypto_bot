@@ -117,7 +117,7 @@ class TestLegacyDatabaseIsActuallyMigrated:
 
         db = Database(path)
         try:
-            assert db.schema_version() == "11"
+            assert db.schema_version() == "12"
             assert _closed_by_accepts(db, reason), (
                 f"closed_by={reason!r} отклонён CHECK-констрейнтом: миграция v10 "
                 "отчиталась об успехе, не пересоздав таблицу"
@@ -153,7 +153,7 @@ class TestLegacyDatabaseIsActuallyMigrated:
 
         db = Database(path)
         try:
-            assert db.schema_version() == "11"
+            assert db.schema_version() == "12"
             assert _closed_by_accepts(db, "reversion")
             # Ссылающаяся строка должна пережить своп таблицы.
             assert db.conn.execute("SELECT COUNT(*) FROM trades").fetchone()[0] == 1
@@ -183,7 +183,7 @@ class TestFreshDatabase:
     def test_new_db_accepts_new_close_reasons(self, tmp_path, reason) -> None:
         db = Database(tmp_path / "fresh.db")
         try:
-            assert db.schema_version() == "11"
+            assert db.schema_version() == "12"
             assert _closed_by_accepts(db, reason)
         finally:
             db.close()
@@ -196,7 +196,7 @@ class TestFreshDatabase:
 
         second = Database(path)
         try:
-            assert second.schema_version() == "11"
+            assert second.schema_version() == "12"
             assert _closed_by_accepts(second, "time_stop")
         finally:
             second.close()

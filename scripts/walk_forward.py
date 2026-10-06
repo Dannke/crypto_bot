@@ -44,6 +44,7 @@ from pathlib import Path
 from crypto_bot.config.env import Config
 from crypto_bot.config.settings import load_settings
 from crypto_bot.core.enums import Mode, StrategyType
+from crypto_bot.data.instruments import InstrumentCache
 from crypto_bot.simulation.historical_source import HistoricalCandleSource
 from crypto_bot.simulation.market_constants import MARKET_QUOTE_VOLUME
 from crypto_bot.simulation.walk_forward import (
@@ -102,6 +103,20 @@ def main() -> None:
         help="Disable funding (legacy fee + slippage only)"
     )
     parser.add_argument(
+        "--instrument-snapshot", default=None, metavar="PATH",
+        help="Instrument specs from this snapshot (scripts/snapshot_instruments.py) instead of "
+             "the live 24 h cache, whose list depends on the day of the run",
+    )
+    parser.add_argument(
+        "--instrument-snapshot-sha256", default=None, metavar="HEX",
+        help="Refuse the snapshot unless its sha256 is this one",
+    )
+    parser.add_argument(
+        "--live-instruments", action="store_true", default=False,
+        help="Exploratory runs only: take instrument specs from the live 24 h cache. "
+             "A registered run never does; a portfolio run without a snapshot refuses to start",
+    )
+    parser.add_argument(
         "--max-leverage", type=float, default=10.0,
         help="Max leverage for portfolio layer (margin check)"
     )
@@ -113,6 +128,14 @@ def main() -> None:
 
     if not 0 < args.split < 1:
         parser.error("--split must be between 0 and 1 (exclusive)")
+    if args.mode == "portfolio" and not args.instrument_snapshot and not args.live_instruments:
+        parser.error(
+            "a portfolio run needs --instrument-snapshot: the live cache holds whatever list "
+            "the last fetch returned, testnet or mainnet (backlog items 3, 13). "
+            "--live-instruments allows it for an exploratory run"
+        )
+    if args.instrument_snapshot and args.live_instruments:
+        parser.error("--instrument-snapshot and --live-instruments exclude each other")
     if args.three_way:
         if not 0 < args.validation_split < 1:
             parser.error("--validation-split must be between 0 and 1 (exclusive)")
@@ -189,6 +212,17 @@ def main() -> None:
         counts = {sym: len(funding_source.events_up_to(2**63 - 1, sym)) for sym in symbols}
         print(f"Funding events loaded from {args.db}: {counts}")
 
+    # Instrument specs: a pinned snapshot, or the live cache (backlog item 3)
+    instrument_cache = None
+    if args.instrument_snapshot:
+        instrument_cache = InstrumentCache.from_snapshot(
+            args.instrument_snapshot, expected_sha256=args.instrument_snapshot_sha256,
+        )
+        print(f"Instrument specs: {args.instrument_snapshot} sha256 {instrument_cache.snapshot_sha256} "
+              f"source {instrument_cache.api_base_url or 'not recorded'}")
+    else:
+        print("Instrument specs: live 24 h cache (--live-instruments) — exploratory, not reproducible")
+
     result = run_walk_forward(
         config,
         symbols=symbols,
@@ -206,6 +240,7 @@ def main() -> None:
         start_ms=start_ms,
         end_ms=end_ms,
         funding_source=funding_source,
+        instrument_cache=instrument_cache,
     )
 
     def tf(ts: int) -> str:
