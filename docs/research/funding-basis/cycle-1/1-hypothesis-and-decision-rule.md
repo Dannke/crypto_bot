@@ -132,6 +132,49 @@ for label, c_rt in (('31 bps, только комиссии (план)', 0.0031)
 
 ---
 
+## Поправка 3 (2026-10-06, до данных): снимок спецификаций и допуск спот-ноги
+
+Причина — снимок спецификаций, обещанный поправкой 2. Ставки фандинга и перп-цены не загружались,
+результатов на validation и test нет. Гипотеза, условия и пороги не меняются.
+
+**Снимок mainnet** снят скриптом из PR B плана (Task 3): только `/v5/market/instruments-info`,
+`category=linear` и `category=spot`, без цен и ставок.
+
+```bash
+PYTHONIOENCODING=utf-8 python scripts/snapshot_instruments.py
+```
+
+```
+snapshot data/instruments/bybit_instruments_2026-10-06T0742Z.json
+source https://api.bybit.com; fetched_at 2026-10-06 07:42 UTC; sha256 dfd42cd9a3dff93981b4d7a343311481731bbc0991a9f45efcdf25dec2b4ad9c
+linear: 890 specs, 890 with launchTime
+spot: 530 specs, 0 with launchTime
+linear perpetuals: 850
+linear BTCUSDT: LinearPerpetual Trading qty_step 0.001 min_notional 5 launch 2020-03-15 00:00
+linear ETHUSDT: LinearPerpetual Trading qty_step 0.01 min_notional 5 launch 2021-03-15 00:00
+spot   BTCUSDT: Spot Trading qty_step 1e-06 min_notional 5 launch none
+spot   ETHUSDT: Spot Trading qty_step 1e-05 min_notional 5 launch none
+```
+
+- Файл в git, с атрибутом `-text` в `.gitattributes`: при `core.autocrlf` git иначе заменил бы
+  переводы строк при checkout, и sha256 не совпал бы. Регистрация (Task 9) передаёт его как
+  `--instrument-snapshot` с `--instrument-snapshot-sha256`.
+- В git и снимок цикла 2 MR `data/cache/bybit_instruments_2026-09-26T0709Z.json` (sha256
+  `766b66e5690b1ab73ecae7aaf84839727a3d25cfa194b527fad337acbd5c5e33`, приложение B), на котором
+  стоит тест 8.
+- Шаг количества и минимальный номинал BTC и ETH совпадают со снимком от 2026-09-26 18:44 UTC
+  (приложение B); расхождений, требующих изменить раздел 4.1, нет.
+
+**`launchTime` у спота нет.** Bybit отдаёт его всем 890 спецификациям `linear` и ни одной из 530
+`spot` — это ответ API: разборщик берёт поле у любой категории, когда оно есть. Допуск
+`launchTime ≤ t` работает только для перп-ноги. Правило для спот-ноги: нога допускается на тике `t`,
+если её спецификация в статусе `Trading` и в файле данных есть спот-бар, закрывшийся в `t`. G1
+требует полного спот-ряда на окне, поэтому пропуск — остановка до PnL, а не тихий недопуск.
+Для BTC и ETH спот торгуется задолго до начала окна; правило нужно, чтобы допуск не держался на
+поле, которого нет.
+
+---
+
 ## 1. Зафиксированные решения
 
 | решение | значение | источник |

@@ -45,7 +45,7 @@ docs/
     ├── funding-basis/
     │   ├── plan.md                    ← план шага cash-and-carry: задачи, риски, DoD
     │   └── cycle-1/
-    │       └── 1-hypothesis-and-decision-rule.md ← Task 0': гипотеза, decision rule, гейты — до измерений; поправки 1–2
+    │       └── 1-hypothesis-and-decision-rule.md ← Task 0': гипотеза, decision rule, гейты — до измерений; поправки 1–3
     ├── funding-carry/
     │   └── cycle-1/
     │       └── 1-hypothesis-and-decision-rule.md ← Task 0 межсекционного carry, отложен; F0–F5, D1, E1–E3

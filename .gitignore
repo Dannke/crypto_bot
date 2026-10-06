@@ -12,6 +12,14 @@ config/universe.yaml
 # --- Runtime data & logs ---
 data/*
 !data/.gitkeep
+# Снимки спецификаций фиксируют вселенную бэктеста по sha256 (поправка 2 Task 0'
+# funding/basis): они версионируются, в отличие от 24-часового кэша рядом.
+!data/instruments/
+data/instruments/*
+!data/instruments/bybit_instruments_*.json
+!data/cache/
+data/cache/*
+!data/cache/bybit_instruments_2026-09-26T0709Z.json
 logs/*
 !logs/.gitkeep
 *.db
