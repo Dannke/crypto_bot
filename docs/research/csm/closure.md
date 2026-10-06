@@ -5,6 +5,69 @@
 
 ---
 
+## Поправка 1 (2026-09-26): «846 funding events» — не измерение
+
+**Что неверно.** В таблице изменённых файлов ниже, в строке `data/crypto_bot.db`, указано
+«846 funding events». В `funding_rates` 752 события: восемь символов по 94, у POL/USDT — ни
+одного (команда 1). Данные не менялись: 846 никогда не было измерено.
+
+**Откуда число.** Строка появилась в `9f64156` (v1.7, 2026-09-14) одновременно здесь и в
+`audit.md` («846 funding rates (to Feb 2024) … 9 symbols»), без команды и вывода; из
+`audit.md` её убрал `481deae` при разделении аудита (команда 3). 846 = 9 × 94: предполагалось,
+что каждый из девяти символов вселенной получил по 94 события.
+
+**Почему у POL нет событий.** Фандинг загружался за 2024-01-01 … 2024-02-01 — диапазон по
+умолчанию `scripts/populate_funding_and_instruments.py`, — а перпетуал POLUSDT запущен
+2024-09-05 08:30 UTC (команда 2). За январь 2024 биржа событий не вернула, и скрипт перешёл к
+следующему символу. rowid таблицы — сплошные 1–752 в порядке списка `SYMBOLS` скрипта, где POL
+последний; кода, удаляющего строки `funding_rates`, в репозитории нет.
+
+**Вердикт не меняется.** Строка описывает содержимое БД, а не вход расчёта. На test-окне CSM
+фандинга в БД нет вовсе, а в эквити портфельного бэктеста фандинг не попадает при любых данных —
+F2 и F3 в
+[разделе 0.2](../funding-carry/cycle-1/1-hypothesis-and-decision-rule.md#02-не-переиспользуется-без-изменений--вопреки-брифу)
+документа `funding-carry/cycle-1/1-hypothesis-and-decision-rule.md`.
+
+**Остальные числа той же строки** — 776 спецификаций и 9 символов × 23K свечей — описывают
+состояние на дату записи и сейчас не воспроизводятся: кэш спецификаций перезапрашивается раз в
+24 ч, свечи с тех пор дополнены до 2026-09-17
+([приложение A](../funding-carry/cycle-1/1-hypothesis-and-decision-rule.md#приложение-a-покрытие-данных--только-счётчики-и-метки-времени)
+того же документа).
+
+Команды читают только счётчики, rowid и метки времени — значения ставок не выбираются.
+Выполнено 2026-09-26, интерпретатор `C:\Python311`:
+
+```bash
+# 1
+python -c "import sqlite3; c=sqlite3.connect('file:data/crypto_bot.db?mode=ro', uri=True); print(c.execute('select count(*) from funding_rates').fetchone()); [print(r) for r in c.execute('select symbol, count(*), min(rowid), max(rowid), min(funding_time_ms), max(funding_time_ms) from funding_rates group by symbol order by min(rowid)')]"
+# 2
+curl -s "https://api.bybit.com/v5/market/instruments-info?category=linear&symbol=POLUSDT" | python -c "import sys, json, datetime as d; i = json.load(sys.stdin)['result']['list'][0]; print(i['symbol'], i['contractType'], i['status'], d.datetime.fromtimestamp(int(i['launchTime']) / 1000, d.UTC).strftime('%Y-%m-%d %H:%M'))"
+# 3
+git log --format='%h %ad %s' --date=short -S"846 funding"
+```
+
+```
+# 1
+(752,)
+('BTC/USDT', 94, 1, 94, 1704067200000, 1706745600000)
+('ETH/USDT', 94, 95, 188, 1704067200000, 1706745600000)
+('SOL/USDT', 94, 189, 282, 1704067200000, 1706745600000)
+('XRP/USDT', 94, 283, 376, 1704067200000, 1706745600000)
+('AVAX/USDT', 94, 377, 470, 1704067200000, 1706745600000)
+('ADA/USDT', 94, 471, 564, 1704067200000, 1706745600000)
+('DOGE/USDT', 94, 565, 658, 1704067200000, 1706745600000)
+('BNB/USDT', 94, 659, 752, 1704067200000, 1706745600000)
+# 2
+POLUSDT LinearPerpetual Trading 2024-09-05 08:30
+# 3
+481deae 2026-09-26 docs: split the architecture audit into an overview and a backlog
+9f64156 2026-09-14 v1.7: Systematic Trading Research Platform
+```
+
+`1704067200000` и `1706745600000` — 2024-01-01 00:00 и 2024-02-01 00:00 UTC.
+
+---
+
 ## ✅ Чек-лист закрытия (все 6 пунктов выполнены)
 
 | # | Критерий | Статус | Доказательство |

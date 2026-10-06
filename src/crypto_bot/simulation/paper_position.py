@@ -30,6 +30,9 @@ class PaperPosition:
     pnl_abs: float | None = None
     closed_by: str | None = None  # stop_loss | take_profit | manual | signal
     entry_fee_abs: float = 0.0  # entry commission, subtracted from P&L on close
+    position_id: int | None = None  # row id in the positions table, once persisted
+    funding_abs: float = 0.0  # funding credited so far: positive received, negative paid
+    funding_through_ms: int | None = None  # settlement time of the last credited funding event
 
     @property
     def is_open(self) -> bool:
@@ -63,6 +66,9 @@ class PaperPosition:
               closed_by: str | None = None, exit_fee_abs: float = 0.0) -> None:
         """Close the position at the given price.
 
+        Funding credited while the position was open is part of its realized
+        P&L: ``pnl_abs`` is the price P&L minus both fees plus ``funding_abs``.
+
         Args:
             exit_price: Exit price.
             exit_time: Optional exit timestamp.
@@ -83,9 +89,10 @@ class PaperPosition:
         else:  # SHORT
             gross_pnl = (self.entry_price - self.exit_price) * self.size
 
-        # Deduct both entry and exit fees
+        # Deduct both entry and exit fees; funding stays in (F2: it used to be
+        # overwritten here, so no closed position ever kept its funding).
         total_fees = self.entry_fee_abs + exit_fee_abs
-        self.pnl_abs = gross_pnl - total_fees
+        self.pnl_abs = gross_pnl - total_fees + self.funding_abs
         self.pnl_pct = (self.pnl_abs / (self.entry_price * self.size)) * 100.0
 
     def check_stop_loss(self, current_price: float) -> bool:
@@ -108,22 +115,22 @@ class PaperPosition:
         else:  # SHORT
             return current_price <= self.take_profit
 
-    def apply_funding(self, amount: float) -> None:
-        """Apply funding payment to the position's P&L.
+    def apply_funding(self, amount: float, funding_time_ms: int) -> None:
+        """Credit one funding settlement to the open position.
+
+        Funding is cash exchanged at the settlement, so it is kept apart from
+        the price P&L: ``close()`` adds it to ``pnl_abs`` and the tracker counts
+        it in equity while the position is still open.
 
         Args:
-            amount: Funding amount (negative = cost, positive = income).
-                    This is added to pnl_abs directly.
+            amount: Funding credited, positive = received, negative = paid.
+            funding_time_ms: Settlement time of the event, remembered so the
+                same settlement is never credited twice.
         """
         if not self.is_open:
-            return
-        # Initialize pnl_abs if None (shouldn't happen but defensive)
-        if self.pnl_abs is None:
-            self.pnl_abs = 0.0
-        self.pnl_abs += amount
-        # Recalculate pnl_pct based on updated pnl_abs
-        if self.entry_price * self.size > 0:
-            self.pnl_pct = (self.pnl_abs / (self.entry_price * self.size)) * 100.0
+            raise ValueError("funding can only be credited to an open position")
+        self.funding_abs += amount
+        self.funding_through_ms = funding_time_ms
 
     def to_dict(self) -> dict:
         """Convert position to dictionary for logging/serialization."""
@@ -142,4 +149,5 @@ class PaperPosition:
             "closed_by": self.closed_by,
             "pnl_pct": self.pnl_pct,
             "pnl_abs": self.pnl_abs,
+            "funding_abs": self.funding_abs,
         }

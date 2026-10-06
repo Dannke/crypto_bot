@@ -74,6 +74,8 @@ class Database:
         self._migrate_v9()
         # v10: add 'reversion' and 'time_stop' to positions.closed_by CHECK constraint
         self._migrate_v10()
+        # v11: one funding_payments row per position and settlement (F5)
+        self._migrate_v11()
 
     def _migrate_v2(self) -> None:
         if self._schema_version_at_open >= 2:
@@ -315,6 +317,42 @@ class Database:
             raise StorageError(f"migration v10 (positions.closed_by CHECK) failed: {exc}") from exc
         finally:
             self._conn.execute("PRAGMA foreign_keys = ON;")
+
+    def _migrate_v11(self) -> None:
+        if self._schema_version_at_open >= 11:
+            return
+        # F5: уникальности (position_id, funding_time_ms) не было, а бэктестер
+        # до v11 на каждом тике заново журналировал все расчёты с открытия
+        # позиции (F1) — одна пара позиция × расчёт давала по строке на тик.
+        # Остаётся первая строка пары, вторая дальше запрещена индексом. Суммы
+        # старых строк посчитаны с дефектом F4 и для сверки с эквити непригодны:
+        # миграция восстанавливает только уникальность.
+        #
+        # Миграция идемпотентна: код до v11 при каждом открытии безусловно
+        # штампует версию 10, и после него общая БД (data/crypto_bot.db при
+        # переключении веток) проходит v11 повторно. Поэтому IF NOT EXISTS и
+        # никаких преобразований значений.
+        #
+        # Удаление дублей, индекс и штамп версии — одна транзакция: при сбое БД
+        # остаётся на v10, и следующее открытие повторит миграцию.
+        try:
+            self._conn.executescript("""
+                BEGIN;
+                DELETE FROM funding_payments
+                 WHERE id NOT IN (
+                     SELECT MIN(id) FROM funding_payments
+                      GROUP BY position_id, funding_time_ms
+                 );
+                CREATE UNIQUE INDEX IF NOT EXISTS uq_funding_payments_position_time
+                    ON funding_payments (position_id, funding_time_ms);
+                INSERT INTO schema_meta (key, value) VALUES ('schema_version', '11')
+                    ON CONFLICT(key) DO UPDATE SET value='11';
+                COMMIT;
+            """)
+        except sqlite3.Error as exc:
+            if self._conn.in_transaction:
+                self._conn.rollback()
+            raise StorageError(f"migration v11 (funding_payments uniqueness) failed: {exc}") from exc
 
     @property
     def conn(self) -> sqlite3.Connection:

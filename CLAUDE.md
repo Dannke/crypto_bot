@@ -32,8 +32,9 @@ curated-подмножество тестов здесь стоит времен
    walk-forward, closure-документ) — используется skill `research-methodology`
    (загружается автоматически по описанию, см. `.claude/skills/`).
 6. Перед дорогим прогоном (walk-forward, полный backtest) — обязательно делегировать проверку
-   subagent'ам `preregistration-guardian` и `cost-gate-auditor` (см. `.claude/agents/`), не
-   заявлять готовность самостоятельно.
+   subagent'ам `preregistration-guardian`, `cost-gate-auditor` и `regression-guardian`
+   (см. `.claude/agents/`), не заявлять готовность самостоятельно. Вердикты — свежие, против
+   текущего коммита: вердикты прошлых шагов не переиспользуются.
 
 ## Стек и конвенции
 - Python 3.x, pytest, ruff, SQLite (`data/crypto_bot.db`), Pydantic v2 для конфигов.

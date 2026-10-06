@@ -1,0 +1,3 @@
+# Снимки спецификаций закреплены по sha256: никакого преобразования концов строк
+data/instruments/*.json -text
+data/cache/bybit_instruments_2026-09-26T0709Z.json -text

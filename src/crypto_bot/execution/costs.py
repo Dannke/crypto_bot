@@ -258,22 +258,26 @@ class CompositeCostModel(ExecutionCostModel):
     def accrue_funding(
         self,
         side: Side,
-        weight: float,
-        entry_price: float,
+        quantity: float,
+        reference_price: float,
         funding_events: Sequence[FundingEvent],
     ) -> CostResult:
-        """Accrue funding for a position using the embedded funding model."""
+        """Accrue funding for a position using the embedded funding model.
+
+        ``quantity`` is the position size in base units, not a portfolio weight;
+        ``reference_price`` prices the notional of events without a mark price.
+        """
         if self._funding_model is None:
             return CostResult(
                 fee_pct=0.0, fee_abs=0.0, slippage_pct=0.0, slippage_abs=0.0,
-                adjusted_price=entry_price, net_amount=0.0
+                adjusted_price=reference_price, net_amount=0.0
             )
         # FundingCostModel has accrue method
         if hasattr(self._funding_model, 'accrue'):
-            return self._funding_model.accrue(side, weight, entry_price, funding_events)  # type: ignore[attr-defined]
+            return self._funding_model.accrue(side, quantity, reference_price, funding_events)  # type: ignore[attr-defined]
         return CostResult(
             fee_pct=0.0, fee_abs=0.0, slippage_pct=0.0, slippage_abs=0.0,
-            adjusted_price=entry_price, net_amount=0.0
+            adjusted_price=reference_price, net_amount=0.0
         )
 
     def calculate(
@@ -348,16 +352,21 @@ class FundingCostModel(ExecutionCostModel):
     def accrue(
         self,
         side: Side,
-        weight: float,
-        entry_price: float,
+        quantity: float,
+        reference_price: float,
         funding_events: Sequence[FundingEvent],
     ) -> CostResult:
         """Calculate funding cost for a position across funding events.
 
         Args:
             side: Position side (LONG or SHORT)
-            weight: Portfolio weight (e.g., 0.1 for 10%)
-            entry_price: Reference price for notional calculation
+            quantity: Position size in base units (coins), not a portfolio weight:
+                the notional is ``quantity × price`` in the quote currency. The
+                backtester once passed ``size / equity × entry_price`` here, so
+                the notional came out as a weight times a price (F4).
+            reference_price: Price at the settlement for events that carry no
+                mark price — the caller supplies the close of the bar ending at
+                the settlement time.
             funding_events: Funding events that occurred while position was open
 
         Returns:
@@ -369,15 +378,15 @@ class FundingCostModel(ExecutionCostModel):
                 fee_abs=0.0,
                 slippage_pct=0.0,
                 slippage_abs=0.0,
-                adjusted_price=entry_price,
+                adjusted_price=reference_price,
                 net_amount=0.0,
             )
 
         total_funding = 0.0
         for event in funding_events:
-            # Position notional at mark price (or fall back to entry_price)
-            mark = event.mark_price if event.mark_price is not None else entry_price
-            notional = abs(weight) * mark
+            # Position value at the settlement: mark price when the exchange gave one
+            mark = event.mark_price if event.mark_price is not None else reference_price
+            notional = abs(quantity) * mark
 
             # Funding cost: positive rate -> long pays, short receives
             # cost = notional * rate for long, -notional * rate for short
@@ -394,7 +403,7 @@ class FundingCostModel(ExecutionCostModel):
             fee_abs=abs(total_funding),
             slippage_pct=0.0,
             slippage_abs=0.0,
-            adjusted_price=entry_price,
+            adjusted_price=reference_price,
             net_amount=-total_funding,  # negative = net cost to P&L
         )
 
