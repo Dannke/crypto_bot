@@ -26,8 +26,10 @@ Test-сегмент 2025-11-24..2026-09-17 для mean reversion израсхо�
 funding/basis, приоритет №4 из [`research/mean-reversion/plan.md`](research/mean-reversion/plan.md),
 раздел 9: cash-and-carry на BTC и ETH с моделью капитала К1 (решение владельца 2026-09-27), план
 шага — [`research/funding-basis/plan.md`](research/funding-basis/plan.md). Учёт фандинга в
-бэктесте исправлен (Task 1 плана: F0–F5 в разделе 0.2 документа межсекционного carry); до
-первого измерения нужно загрузить данные.
+бэктесте исправлен (Task 1 плана, PR #8: F0–F5 в разделе 0.2 документа межсекционного carry).
+Данные цикла — отдельный файл `data/funding_basis.db`; `data/crypto_bot.db` заморожена на v11
+и для закрытых циклов читается только на чтение (поправка 2 Task 0'). До первого измерения:
+метрики, рынок как атрибут инструмента, загрузка данных (Task 2–4).
 
 ## Структура
 
@@ -43,7 +45,7 @@ docs/
     ├── funding-basis/
     │   ├── plan.md                    ← план шага cash-and-carry: задачи, риски, DoD
     │   └── cycle-1/
-    │       └── 1-hypothesis-and-decision-rule.md ← Task 0': гипотеза, decision rule, гейты — до измерений; поправка 1
+    │       └── 1-hypothesis-and-decision-rule.md ← Task 0': гипотеза, decision rule, гейты — до измерений; поправки 1–2
     ├── funding-carry/
     │   └── cycle-1/
     │       └── 1-hypothesis-and-decision-rule.md ← Task 0 межсекционного carry, отложен; F0–F5, D1, E1–E3
