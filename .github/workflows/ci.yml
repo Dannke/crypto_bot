@@ -4,21 +4,25 @@ on:
   push:
     branches: [main, master]
   pull_request:
-    branches: [main, master]
+    branches: [main, master, "research/**"]
 
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+          cache: pip
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip setuptools wheel
           pip install -e ".[dev]"
       - name: Lint (ruff)
         run: ruff check src/
-      - name: Snapshot cross-validation tests (CI-ready, no live DB needed)
-        run: python -m pytest tests/test_backtest/ -m "cross_validate_snapshot" -v
+      - name: Full test suite, no exclusions (CLAUDE.md, rule 1)
+        # pyproject addopts carry -q, which hides the counts line; -ra keeps the
+        # counts and the reason of every skip in the log
+        run: python -m pytest tests/ -o addopts=-ra -n auto --dist worksteal
